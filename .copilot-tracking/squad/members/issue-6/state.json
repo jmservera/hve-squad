@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "1.3",
+  "updated": "2026-08-07T13:42:17Z",
+  "turn": 1,
+  "mode": "autopilot",
+  "activeRoles": [],
+  "openEscalations": [],
+  "currentRun": {
+    "sessionModel": "claude-sonnet-5",
+    "modelOverrides": {},
+    "estCostUsd": 0.12,
+    "estCreditsTotal": 12.0
+  },
+  "notify": {
+    "approvalChannel": "in-chat",
+    "enabled": false,
+    "email": "",
+    "github": {
+      "handle": "",
+      "repo": ""
+    }
+  },
+  "trigger": {
+    "source": "issue",
+    "ref": "jmservera/hve-squad#6",
+    "eventId": "issues:5090691674",
+    "actor": "jmservera",
+    "sub": "issue-6"
+  }
+}
