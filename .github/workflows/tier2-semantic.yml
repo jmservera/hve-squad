@@ -1,5 +1,8 @@
 name: Tier 2 Semantic
 
+# AI cost: none here; self-checks and rescoring reuse fixtures or saved Tier 1 runs.
+# Producing fresh Tier 1 observations is a separate, potentially paid workflow.
+
 # Scores Tier 1 runs against the golden baselines captured from the last good release.
 #
 # Tier 0 asks "is the package well-formed". Tier 1 asks "did the work actually happen".
@@ -103,6 +106,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install Pester

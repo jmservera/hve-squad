@@ -55,6 +55,7 @@ bash tests/tier2/live-benchmark/start-efficiency-wizard.sh
 
 # Optional paths are forwarded unchanged, including spaces.
 bash tests/tier2/live-benchmark/start-efficiency-wizard.sh \
+    -ParallelTrials \
     -WorkRoot "$HOME/bench/squad efficiency"
 ```
 
@@ -77,36 +78,264 @@ installation and model-backed execution are not part of that validation.
 Optional `-WorkRoot 'C:\bench\efficiency'` and `-BaselineEvidencePath '<control-series.json>'`
 set initial paths. The default work root is `%LOCALAPPDATA%\hve-squad\efficiency`
 (the corresponding local application-data directory on Linux), outside the checkout.
-Every launch uses a fresh `run-<timestamp>-<id>` and preserves old reports and controls.
+Formal launches use a fresh `run-<timestamp>-<id>` and preserve old reports and controls.
+Local smoke/comparison launches use separate `local-test-<id>` directories.
 
-| Choice | Work after setup |
+The last completed valid questionnaire is remembered in
+`.efficiency-wizard-defaults.json` at the wizard checkout root. This file and its
+atomic-write temporaries are gitignored. Both launchers reuse the saved mode,
+paths, model, credit ceilings and scheduling as question defaults; explicit
+work/control paths and `-ParallelTrials` take precedence. A changed plan raises
+the total default if needed to cover every reservation. Offline mode preserves
+your previous live answers. Cancelled or invalid questionnaires do not replace
+them, and later prerequisite/test failures do not discard completed answers.
+Delete this file to reset defaults; malformed settings stop with reset guidance.
+The Copilot login method and later setup answers are saved immediately, even if
+a later login or preparation step fails. The next run defaults to the last login
+method and clean-install reuse answer; install validity is still checked.
+Credentials and tokens are never stored. Remembered login methods do not
+authorize authentication: browser/PAT login still requires fresh confirmation.
+Installation, archival and launch answers are reminders only; those confirmations
+still default to no. The spending authorization answer is also saved against its
+configuration as a reminder only: every live run still requires fresh explicit
+isolation/spending confirmation; blank means no.
+
+During execution the wizard prints a plain-text progress snapshot every 30 seconds,
+plus snapshots at child start and finish. Each scheduled baseline/candidate trial
+shows its active phase, phase duration, completed milestone count, and available
+CLI-output byte count/last activity, including all three parallel trials.
+The seven unequal milestones are preflight, init, requirements, build, functional
+acceptance, judge and report: they are **not** a model-completion percentage or
+time estimate. A long build can legitimately remain at 3/7; changing duration and
+output activity provide context without inventing an ETA. Pending serial trials
+say awaiting preflight. Finished/failed snapshots print once unless their result
+changes, with known independent-check and observation-recording status.
+Offline progress counts the three self-test files; wizard boundaries count
+scheduled steps. Neither count implies quality approval.
+
+Child stdout/stderr is retained in `wizard-stage-<id>.log` and its `.stderr`
+sibling under the fresh wizard run directory and displayed when that stage ends.
+Trial phase snapshots are retained as `trials/<arm>-<pair>/out/progress.json`
+inside the control/comparison directory. Progress reporting does not alter
+spending limits, trial scheduling, watchdogs or baseline promotion.
+
+`wizard-result.json` includes each benchmark stage's independent-check outcome,
+record count, report and portable-record paths, saved-control path when available,
+and offline publication command. Exit zero means the selected collection
+completed, not that the measured process passed: quality/readiness failures produce
+`completed-with-findings`, not `passed`. Missing/malformed expected result evidence
+is an execution error. Records remain local and **uncommitted to Git** until the
+printed offline export command is used in a compatible writable delivery checkout.
+Reporting/publication repairs do not require another paid run.
+
+Live modes accept current CLI versions advertising `--sync-session off`, or older
+versions advertising both `--no-remote` and `--no-remote-export`. The wizard no
+longer demands flags removed in CLI 1.0.103. The same policy protects workflow,
+judge and ACP launches; an unrecognized sync policy fails closed. Modern sync-off
+disables account-history upload, not incoming control: the harness creates local
+sessions and never opts into remote connection/hosting modes. This is not an OS sandbox.
+
+After the credit ceilings, choose **Serial** (initial default) or **Three observations in
+parallel**, or pass `-ParallelTrials` through either launcher to select it directly.
+The bash starter forwards this switch unchanged with quoted path arguments.
+Parallel mode starts three independent native trials, each with its
+own workspace, session, log, credit allowance and watchdog. All three allowances
+must fit before launch; failures do not retry or discard already-started siblings.
+Concurrent runs compete for host resources and service capacity. Scheduling mode
+is part of compatibility: parallel candidates require parallel controls, and older
+controls must be recollected after this protocol change. Complete still finishes
+the control phase before starting candidates; offline checks remain first.
+
+| Choice | Work and AI cost | Recommended use |
+| --- | --- | --- |
+| 1. Establish | Full offline checks + 3 paid controls; records failures, no improvement claim | First baseline or changed benchmark protocol |
+| 2. Series | Full offline checks + 3 paid candidates; saved controls are optional comparison only | Score a committed candidate without depending on its parent |
+| 3. Complete | Full offline checks + 3 fresh paid controls + 3 paid candidates | Refresh both arms; highest total cost |
+| 4. Offline | All self-tests; no AI/login, Python/pytest setup may download packages | Thorough harness validation before formal collection |
+| 5. Offline smoke | Exactly 1 simulated candidate; no AI/login/downloads/Python; installed Git/Pester required | Fast harness editing feedback, including uncommitted changes |
+| 6. Single candidate score | Smoke first, then 1 paid candidate workflow including judge; descriptive local score/badge, optional historical scores | Debug current local changes without requiring controls |
+| 7. Repair setup | Reviews measured changes, offers a source-only local commit, then keeps a valid install or offers archive/rebuild; no push, AI, login or benchmark runs | Recover setup before choosing 1 or 2; rebuilding packages may download dependencies |
+
+### Repair after a local diagnostic
+
+`invalid-record:measured-source-mismatch` means the measured `squad-src/` bytes
+do not match the selected checkout's Git `HEAD`. Option 6 allows uncommitted
+changes; it does **not** damage the install or make those changes formal evidence.
+
+Choose **7**, review the exact measured paths, and explicitly approve a
+**source-only local commit** if they contain the changes you intend to measure.
+Blank means no: declining leaves source, index and HEAD unchanged. The commit
+includes the complete current contents of those paths, including deletions and
+untracked/ignored additions, not just staged hunks. Unrelated staged and unstaged
+work is preserved. Normal Git identity, signing and hooks apply; nothing is pushed.
+Then choose **1** or **2**. Already committed source needs no new commit.
+
+Formal modes still check measured source and the actual executing protocol
+**before prerequisite setup or login**. Repair verifies the approved bytes and
+commit scope before declaring success. Changed inputs, failed hooks/signing, or
+byte-changing Git attributes/filters/EOL conversion stop repair with diagnostics;
+it does not bypass Git policy, reset files or automatically retry a commit.
+Any commit or hook effects already produced are retained for inspection.
+Repair never rewrites old evidence or turns diagnostic scores into controls.
+
+Option 7 asks only for the evidence root and source checkout. A valid install is
+kept by default. Choose rebuild only when needed: the wizard asks for fresh consent
+to archive the managed `install/` directory and prepare its replacement. Nothing
+is deleted; previous runs, controls and installation contents remain available.
+Rebuilding may download packages and change dependency hashes. A successful repair
+checks source/protocol and package layout/manifest, **not** live authorization,
+saved-control compatibility, offline-suite success or benchmark quality. Options 1
+and 2 still perform their full checks and require fresh spending consent.
+
+| Failure | Recovery |
 | --- | --- |
-| Establish | Full offline self-tests, then three baseline observations, retaining failures; no improvement claim |
-| Series | Full offline self-tests, then three candidates using compatible saved controls, or six fresh paired trials |
-| Complete | Full offline self-tests, three fresh controls, then three candidates against them and automatic comparison |
-| Offline | Full offline self-tests only; no GitHub/Copilot login or model requests |
+| Uncommitted measured source | Choose 7, review the named changes and approve the source-only local commit, then 1 or 2; alternatively commit them yourself |
+| Git identity/signing/hooks fail, inputs change, or filters alter bytes | Inspect Git output/status and the named attributes/filter/EOL issue; repair the local Git configuration or source, then rerun 7; no automatic rollback or policy bypass |
+| Missing, stale or damaged prepared install | Choose 7 and consent to archive/rebuild; old evidence stays untouched |
+| Saved controls have a different runtime/model/dependency/protocol | Candidate scoring still works; comparison is unavailable. Never edit saved evidence |
+| Parent/candidate commits have different measured protocols | Score the candidate with option 2; comparison is unavailable. Do not copy protocol files into the parent to force compatibility |
 
-Establish is recommended without saved controls; Series is recommended when a
-control file is supplied or discovered. Complete is not retry-until-success.
+### Score first; comparison is optional
+
+Choose **2** for the normal PR check. It always schedules three candidate observations,
+never six on missing or incompatible controls. Select **none** to omit historical
+comparison. Choose **3** only when you explicitly want six fresh paid observations.
+
+Every accepted real attempt retains `score/records/<id>.json`, `score/report.json`,
+`score/report.md` and `score/badge.svg` under its fresh wizard run directory.
+The final `wizard-result.json` links that score directory. Preflight and execution
+failures also retain a labeled failure score; collection failures still exit nonzero.
+Offline smoke and repair are not measurements and do not create scores.
+
+The absolute score is the median of available real document-quality grades, out
+of 100. Three grades are measured; fewer formal grades are partial. Local one-sample
+grades are measured **1/1 but descriptive only**, not a formal comparison.
+No trustworthy grade produces **0/100, measurement failed / not judged**; raw quality
+and unknown costs remain null. An actual judge grade of zero is labeled measured,
+not unjudged. Workflow failures stay visible even with a high document-quality score.
+
+To publish retained trials offline, use the printed command, or:
+
+```powershell
+./tests/tier2/live-benchmark/Export-BenchmarkResults.ps1 -Standalone `
+  -Repository . -TrialDirectories @('/evidence/trials/candidate-1', '/evidence/trials/candidate-2', '/evidence/trials/candidate-3') `
+  -SeriesId 'candidate-my-change' -SelectScore
+```
+
+This appends a sanitized `benchmark-score-v1` record under `benchmarks/efficiency/records/`.
+`-SelectScore` explicitly publishes the report/badge and updates the existing
+`current.json` pointer last; it does not promote a baseline. Omit it to leave the
+selection unchanged. Use `-Local` only for retained local diagnostics, never to
+turn working-tree results into committed formal evidence. Review and commit generated
+files through the normal PR flow. No export or reporting command spends AI credits.
+
+Hosted candidate score artifacts are independent of the strict parent-comparison
+job. That strict job retains its existing required-check behavior. The trusted
+reporter is pinned to owner-reviewed `8a0233d3c55ff18f056d02bb5623dcea52991ec8`,
+supporting standalone score and legacy records without parent discovery.
+Unavailable or invalid candidate evidence retains explicit failed-zero diagnostics
+and a nonzero exit, not an invented measured grade. The separate strict reporter
+and gate are unchanged.
+
+### Compare a committed PR with its parent
+
+Commit the intended PR changes first. Create two detached worktrees so editing the
+development checkout cannot change the measured arms. From the development
+checkout, with the intended target branch available locally:
+
+```bash
+target=origin/main  # Use the actual PR target, not an arbitrary saved baseline.
+candidate=$(git rev-parse HEAD)
+parent=$(git merge-base "$target" "$candidate")
+sources="$HOME/bench/hve-squad-sources"
+git worktree add --detach "$sources/parent" "$parent"
+git worktree add --detach "$sources/pr" "$candidate"
+bash "$sources/pr/tests/tier2/live-benchmark/start-efficiency-wizard.sh" \
+  -WorkRoot "$HOME/bench/hve-squad-evidence"
+```
+
+Use fresh worktree paths if these already exist. This runs the **candidate's**
+wizard/protocol. Choose **3** for an explicitly fresh two-arm comparison, select
+`$HOME/bench/hve-squad-sources/parent` as baseline and
+`$HOME/bench/hve-squad-sources/pr` as candidate. This collects three controls then
+three candidates, after checks and your explicit isolation/spending consent. The commands
+above start setup only; no paid collection occurs without that consent.
+
+Comparison requires both commits to support the same executing benchmark protocol; the early check
+stops otherwise. Do not copy newer protocol files into the parent worktree to
+force admission. If compatible three-control evidence already measures this exact
+parent, select that `control-series.json` instead of **none** to collect only three
+candidates. Fresh pairs replace stale saved controls only when both measured
+revisions are themselves protocol-compatible. Same-checkout arms measure
+repeatability, not PR improvement.
+
+### Local diagnostics
+
+Options **5 and 6 are local diagnostics, never formal comparison evidence**. The offline
+smoke normally takes seconds, uses fake AI responses and intentionally checks
+failure handling; its success does not mean an application passed quality review.
+Run it directly without the questionnaire:
+
+```powershell
+pwsh -NoProfile -File ./tests/tier2/live-benchmark/Invoke-LiveBenchmarkTests.ps1 -SingleCandidate -Output Normal
+```
+
+Option 6 still performs a complete real workflow and may take minutes/use substantial
+credits: one candidate is not one model request. Historical
+`control-series.json` scores are optional. When valid, they are read without modification
+and displayed as dimension medians plus the median of per-run totals.
+Invalid/missing historical scores do not block scoring. Missing raw candidate quality
+stays unavailable; the separately labeled failure-outcome score is zero. Protocol,
+model and rubric differences are disclosed; deltas are descriptive only, not
+compatible comparisons, regression verdicts or evidence of improvement.
+
+Both local options allow uncommitted changes; formal modes still require measured
+files to match Git. Local live execution pins working bytes and stops on later drift.
+No formal `run.json`, controls or accepted baseline is produced by the
+local candidate. Its labelled `diagnostic.json`, portable local score/badge and raw
+failure logs stay outside the checkout. Renaming the diagnostic to `run.json` cannot
+make it formal evidence.
+One-candidate modes are serial and reject `-ParallelTrials`; remembered formal
+scheduling is preserved. Use formal Establish/Series/Complete for publishable results.
+Wizard scratch paths and local diagnostics require physical checkout/output paths.
+Source and output links, including ancestor links and junctions, are rejected before
+creating test output; use the target directory's physical path instead.
+
+### Formal collection and setup
+
+Use Series to score a candidate whether or not controls exist. Establish remains
+available when explicit fresh controls are needed. Later runs default to the remembered
+mode; an explicitly supplied control path recommends Series. Complete is not retry-until-success.
 Selecting the same source for both arms tests repeatability, not patch improvement.
 Select separate baseline/candidate checkouts to compare an actual patch.
 
-Wizard observational defaults are `claude-sonnet-5.5`, 100 AI credits per complete run, 300 total for
+Initial wizard observational defaults are `claude-sonnet-5.5`, 100 AI credits per complete run, 300 total for
 three new runs or 600 for six. These are ceilings, not cost predictions. Paths,
 model and credit ceilings can be changed. The wizard verifies the whole reservation,
 requires explicit disposable-isolation and spending confirmation, preserves the
 financial and isolation protections, and never automatically promotes a baseline.
 Isolation is not created by the wizard or by a launcher flag.
 
-Wizard live modes use **observational collection** (`-ObservationOnly`). Readiness,
+Formal wizard live modes use **observational collection** (`-ObservationOnly`). Readiness,
 functional, review and quality failures are measured, not prerequisites for collecting
 the baseline. Feasible later stages and remaining samples still run; missing grades
-remain unavailable, never zero or invented success. `baseline-recorded` means three
+remain unavailable, never invented judge grades. `baseline-recorded` means three
 observations were saved, not that the workflow passed. Reports retain individual
 checks, independent scores, timing, tokens, requests, credits and reliability counts.
 Comparisons assess relative quality and reliability as well as efficiency; an
 imperfect baseline need not first score 90. Unavailable evidence makes a comparison
 not evaluable, and observations are never automatically promoted.
+
+After each formal wizard collection step, offline finalization exports available
+observations into that step's external `portable/` directory and prints a
+PowerShell command to publish them in a matching writable delivery checkout.
+This also runs after collection failure, preserves the collection exit, and
+never retries paid work. Export needs PowerShell 7.5+; failures remain explicit.
+Review and commit generated evidence yourself; no files are written into the
+measured source while collecting. Direct `-Mode Run` calls still only collect
+private evidence. See [complete and incomplete export commands](../../../benchmarks/efficiency/README.md#record-and-regenerate).
+Unavailable grades/accounting are retained in a separate campaign archive,
+not accepted as a complete three-trial series.
 
 Observational workflows have no request-count cap, allow up to 1,000 native autopilot
 continuations, and use a 180-minute hung-run watchdog. They reserve 30 credits for
@@ -183,6 +412,30 @@ independent document judging. Routine decisions come from the frozen
 The direct exercise CLI remains **strict by default** unless `-ObservationOnly`
 is supplied. The strict readiness, recovery, quality and promotion rules below
 are unchanged; observational collection records their failures separately.
+
+Live preflight uses the offline export validator (PowerShell 7.5+) before any
+model launch. The executing protocol files and selected `squad-src/` must match
+their recorded Git revision; unrelated local edits are allowed. Commit intended
+measured changes before collection, including local grader fixes. Both source
+arms need revisions containing the same executing benchmark protocol. Saved
+controls must bind to their original commits in the baseline repository, or the
+candidate repository when no baseline checkout is supplied; missing objects stop
+without fetching. Serial and parallel children receive the original admission
+pin and recheck it before each paid stage/recovery/judge call. Drift stops further
+work and retains known stages, attempts and accounting in `out/error.json` as
+`provenance-failure`, not a passing/exportable observation. This is point-in-time
+validation, not a filesystem freeze or cancellation of already-running calls.
+
+The fixture supplies synthetic KPI baseline, target, measurement window and
+decision ownership; these are planning inputs, not achieved production results.
+Expected unapproved draft labels alone are not content defects. Blocked canonical
+gates, false approval and unresolved critical/high findings still count. Draft
+copies authorize no governed handoff; observation mode's contract prototype is a
+separately authorized synthetic task. The v2 rubric/scenario is incompatible with
+older controls: preserve them as historical evidence, never relabel their revision.
+Runtime reviewers receive the validated literal-path brief from
+`Get-SquadRuntimeReviewBrief.ps1`; its checks do not certify native permission
+behavior, and denied probes remain unverified failures.
 
 In strict mode, each stage must pass both process/telemetry checks and stage-readiness checks
 before the next stage launches. Initialization requires nonempty shared state,
@@ -317,6 +570,13 @@ $LASTEXITCODE
 
 The control is frozen in `control-001/out/control-series.json`. Establishment
 creates new evidence only; it does not overwrite an accepted optimization report.
+
+Add `-ParallelTrials` to Establish, or to Series with saved controls, to overlap
+the three trials. Use the same switch when collecting those controls. Six fresh
+paired trials remain serial to preserve alternating arm order; combining that
+mode with `-ParallelTrials` is rejected before launch. Catchable cancellation
+stops owned native process trees before removing worker jobs and preserves local
+evidence; forcibly killing the entire host cannot guarantee this cleanup.
 
 ### Run a complete comparison
 
@@ -547,3 +807,11 @@ execution as that revision. Old `benchmark-series-v1` records remain available
 for historical analysis, but are explicitly `stale-record:unbound-execution-protocol`
 for current snapshot validation. The existing selected baseline therefore needs
 new, separately authorized evidence; old records and pointers are not rewritten.
+
+The Scribe verifier's pricing evaluator (v2) prices long-context blocks per block
+and applies calibration once, so its script source changed and `verifierHash`
+changed with it. That hash covers the verifier script only, not imported modules
+such as `SquadState.psm1`; module-only drift is not fingerprinted. The earlier
+83/81 series carry the old verifier hash, remain immutable, and are incompatible
+for direct strict comparison until matching new-verifier evidence is collected.
+There is no waiver and no automatic paid parent refresh.

@@ -2,6 +2,10 @@
 # Copyright (c) 2026 Microsoft Corporation. All rights reserved.
 # SPDX-License-Identifier: MIT
 
+# Starts the PowerShell wizard and forwards every argument, including -ParallelTrials.
+# AI cost: Offline/smoke use no models; local comparison uses 1 paid diagnostic,
+# formal modes use 3 or 6 paid trials. The wizard explains and confirms spending.
+
 set -euo pipefail
 
 ubuntu_install_help() {

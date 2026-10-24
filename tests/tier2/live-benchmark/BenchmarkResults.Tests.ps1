@@ -3,6 +3,9 @@
 # Copyright (c) 2026 Microsoft Corporation. All rights reserved.
 # SPDX-License-Identifier: MIT
 
+# Tests evidence sanitization, compatibility and stored-record comparison.
+# AI cost: none; uses synthetic observations and temporary Git repositories.
+
 BeforeAll {
     Import-Module (Join-Path $PSScriptRoot 'BenchmarkResults.psm1') -Force
     $SourceRoot = (Resolve-Path (Join-Path $PSScriptRoot '../../..')).Path
@@ -103,6 +106,13 @@ BeforeAll {
                 dispatches = @{ 'BRD Quality Reviewer' = 1; 'PRD Quality Reviewer' = 1 }
             }
             $JudgeMetrics = Copy-Value $Metrics; $JudgeMetrics.toolCalls = 0
+            foreach ($EventName in @('build', 'judge')) {
+                $EventPath = Join-Path $Directory "out/$EventName-events.jsonl"
+                [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($EventPath))
+                [IO.File]::WriteAllText($EventPath, "$EventName PRIVATE EVENTS")
+                $Hash = (Get-FileHash $EventPath).Hash.ToLowerInvariant()
+                if ($EventName -eq 'build') { $Metrics.evidence.sha256 = $Hash } else { $JudgeMetrics.evidence.sha256 = $Hash }
+            }
             $Checks = @($Trial.outcomes.Keys | Where-Object { $_.StartsWith('functional/') } | ForEach-Object { @{ name = $_.Substring(11); passed = $true } })
             $WorkflowChecks = @{}
             foreach ($Key in $Trial.outcomes.Keys | Where-Object { $_.StartsWith('workflow/') }) { $WorkflowChecks[$Key.Substring(9)] = $true }
@@ -130,7 +140,318 @@ BeforeAll {
     }
 }
 
+Describe 'Standalone score records' {
+    It 'scores <Count> actual grades without inventing missing samples' -ForEach @(
+        @{ Count = 3; Expected = 3; State = 'measured' },
+        @{ Count = 2; Expected = 3; State = 'partial' },
+        @{ Count = 1; Expected = 1; State = 'measured' },
+        @{ Count = 0; Expected = 1; State = 'failed' }
+    ) {
+        $Trials = @(for ($Index = 0; $Index -lt $Count; $Index++) { @{ quality = @{ businessClarity = 16; scopeFidelity = 16; acceptanceCriteria = 16; traceability = 16; risksAndDecisions = 16 } } })
+        $Score = Get-BenchmarkScore -Trials $Trials -ExpectedSlots $Expected
+        $Score.value | Should -Be $(if ($Count) { 80 } else { 0 })
+        $Score.state | Should -Be $State
+        $Score.judgedSlots | Should -Be $Count
+        $Score.expectedSlots | Should -Be $Expected
+    }
+    It 'exports candidate-only evidence and a numeric badge for <Count> trials, local <Local>' -ForEach @(
+        @{ Count = 3; Local = $false }, @{ Count = 1; Local = $false }, @{ Count = 0; Local = $false }, @{ Count = 1; Local = $true }
+    ) {
+        $Fixture = New-TestRepository; $Raw = New-TestRawEvidence $Fixture
+        $Output = Join-Path $TestDrive "standalone-$Count-$Local"
+        $Directories = @($Raw.directories | Select-Object -First $Count)
+        if ($Local) {
+            Import-Module (Join-Path $PSScriptRoot 'EfficiencyBenchmark.psm1')
+            Set-Content (Join-Path $Fixture.repository 'squad-src/charter.md') 'uncommitted candidate'
+            $Run = $Raw.runs[0]; $Run.schemaVersion = 'efficiency-local-test-v1'; $Run.localDiagnostic = $true
+            $Run.collection = @{ recorded = $false; policy = 'local-diagnostic-v1' }
+            $Run.metadata.sourceHash = Get-EfficiencyTreeHash (Join-Path $Fixture.repository 'squad-src')
+            Write-TestJson (Join-Path $Directories[0] 'out/diagnostic.json') $Run
+        }
+        $Record = Export-BenchmarkScore -Repository $Fixture.repository -TrialDirectories $Directories -SeriesId "candidate-$Count" -OutputDirectory $Output -Local:$Local
+        $Record.score.judgedSlots | Should -Be $Count
+        $Record.score.value | Should -Be $(if ($Count) { 100 } else { 0 })
+        [IO.File]::ReadAllText((Join-Path $Output 'badge.svg')) | Should -Match "$($Record.score.value)/100"
+        Test-Path (Join-Path $Output "records/candidate-$Count.json") | Should -BeTrue
+        $Text = [IO.File]::ReadAllText((Join-Path $Output "records/candidate-$Count.json"))
+        $Text | Should -Not -Match 'PRIVATE|sessionId'
+        Test-Path (Join-Path $Output 'current.json') | Should -BeFalse
+        if ($Local) {
+            $Record.kind | Should -Be local
+            $Record.score.state | Should -Be measured
+            $Record.score.expectedSlots | Should -Be 1
+            [IO.File]::ReadAllText((Join-Path $Output 'badge.svg')) | Should -Match 'local single-sample'
+            Invoke-TestGit $Fixture.repository @('diff', '--cached', '--name-only') | Should -BeNullOrEmpty
+            Get-Content (Join-Path $Fixture.repository 'squad-src/charter.md') | Should -Be 'uncommitted candidate'
+        }
+    }
+    It 'keeps a valid candidate score independent of <Parent>' -ForEach @(
+        @{ Parent = ''; Status = 'unavailable' },
+        @{ Parent = 'missing-parent'; Status = 'unavailable' },
+        @{ Parent = 'valid-parent'; Status = 'unchanged' }
+        @{ Parent = 'no-record'; Status = 'unavailable' }
+        @{ Parent = 'incompatible'; Status = 'unavailable' }
+    ) {
+        $Fixture = New-TestRepository
+        $ParentCommit = $Fixture.revision
+        if ($Parent -eq 'incompatible') {
+            $Other = Copy-Value $Fixture.record; $Other.seriesId = 'other-environment'; $Other.protocol.installHash = 'f' * 64
+            $ParentCommit = Save-TestSelection $Fixture $Other
+        }
+        $Head = Save-TestSelection $Fixture $Fixture.record
+        $Base = if ($Parent -eq 'valid-parent') { $Head } elseif ($Parent -in @('no-record', 'incompatible')) { $ParentCommit } else { $Parent }
+        $Output = Join-Path $TestDrive ('report-' + [guid]::NewGuid().ToString('N'))
+        $Result = Write-BenchmarkCandidateReport -Repository $Fixture.repository -HeadRef $Head -OutputDirectory $Output -BaseRef $Base
+        $Result.score.value | Should -Be 100
+        $Result.exitCode | Should -Be 0
+        $Result.comparison.status | Should -Be $Status
+        [IO.File]::ReadAllText((Join-Path $Output 'badge.svg')) | Should -Match '100/100'
+    }
+    It 'validates score pointers and rejects <Tamper>' -ForEach @(
+        @{ Tamper = 'score' }, @{ Tamper = 'id' }, @{ Tamper = 'digest' }, @{ Tamper = 'schema' }, @{ Tamper = 'publication' }
+    ) {
+        $Fixture = New-TestRepository
+        $Root = Join-Path $Fixture.repository 'benchmarks/efficiency'
+        $Record = Export-BenchmarkScore -Repository $Fixture.repository -Evidence $Fixture.record -SeriesId 'scored' -OutputDirectory $Root -SelectCurrent
+        if ($Tamper -eq 'publication') {
+            $Before = @{}; foreach ($Name in @('report.json', 'report.md', 'badge.svg', 'current.json')) { $Before[$Name] = [IO.File]::ReadAllText((Join-Path $Root $Name)) }
+            Mock Write-BenchmarkFile -ModuleName BenchmarkResults { throw [IO.IOException]::new('fixture pointer write failed') } -ParameterFilter { $Path -like '*/current.json' }
+            { Export-BenchmarkScore -Repository $Fixture.repository -Evidence $Fixture.record -SeriesId 'publication-failure' -OutputDirectory $Root -SelectCurrent } | Should -Throw '*fixture pointer write failed*'
+            foreach ($Name in $Before.Keys) { [IO.File]::ReadAllText((Join-Path $Root $Name)) | Should -BeExactly $Before[$Name] }
+            Test-Path (Join-Path $Root 'records/publication-failure.json') | Should -BeTrue
+            return
+        }
+        if ($Tamper -eq 'score') { $Record.score.value = 1 }
+        if ($Tamper -eq 'id') { $Record.seriesId = 'wrong' }
+        if ($Tamper -eq 'schema') { $Record.schemaVersion = 'unknown-v1' }
+        if ($Tamper -ne 'digest') {
+            Write-TestJson (Join-Path $Root 'records/scored.json') $Record
+            Write-TestJson (Join-Path $Root 'current.json') @{ schemaVersion = 'benchmark-pointer-v1'; recordPath = 'records/scored.json'; sha256 = Get-BenchmarkDigest ([IO.File]::ReadAllBytes((Join-Path $Root 'records/scored.json'))) }
+        } else { Add-Content (Join-Path $Root 'records/scored.json') ' ' }
+        $Head = Save-TestCommit $Fixture.repository
+        { Get-BenchmarkSelection $Fixture.repository $Head -ScoreOnly } | Should -Throw
+        $Result = Write-BenchmarkCandidateReport -Repository $Fixture.repository -HeadRef $Head -OutputDirectory (Join-Path $TestDrive "failed-$Tamper")
+        $Result.score.state | Should -Be failed
+        $Result.score.value | Should -Be 0
+        $Result.exitCode | Should -Be 1
+    }
+    It 'retains valid quality when judge or workflow fails in <Case>' -ForEach @(
+        @{ Case = 'missing-judge'; Judged = 2; Value = 100 },
+        @{ Case = 'workflow-failed'; Judged = 3; Value = 100 },
+        @{ Case = 'judged-zero'; Judged = 3; Value = 0 }
+    ) {
+        $Fixture = New-TestRepository; $Raw = New-TestRawEvidence $Fixture
+        if ($Case -eq 'missing-judge') { $Raw.runs[0].judge = @{ valid = $false; reason = 'unavailable' } }
+        if ($Case -eq 'workflow-failed') { $Raw.runs[0].workflow.passed = $false; $Raw.runs[0].completed = $false }
+        if ($Case -eq 'judged-zero') { foreach ($Run in $Raw.runs) { foreach ($Key in @($Run.judge.response.scores.Keys)) { $Run.judge.response.scores[$Key] = 0 } } }
+        for ($Index = 0; $Index -lt 3; $Index++) { Write-TestJson (Join-Path $Raw.directories[$Index] 'out/run.json') $Raw.runs[$Index] }
+        $Output = Join-Path $TestDrive $Case
+        $Record = Export-BenchmarkScore -Repository $Fixture.repository -TrialDirectories $Raw.directories -SeriesId $Case -OutputDirectory $Output
+        $Record.score.judgedSlots | Should -Be $Judged
+        $Record.score.value | Should -Be $Value
+        if ($Case -ne 'judged-zero') { [IO.File]::ReadAllText((Join-Path $Output 'badge.svg')) | Should -Match '#b45309' }
+        else { $Record.score.state | Should -Be measured }
+    }
+    It 'retains strict regression for complete <Format> evidence wrapped as a score' -ForEach @(@{ Format = 'legacy' }, @{ Format = 'direct' }) {
+        $Fixture = New-TestRepository
+        $Base = Save-TestSelection $Fixture $Fixture.record
+        $Candidate = New-TestCandidate $Fixture.record
+        $Candidate.trials[0].quality.businessClarity = 10
+        $Candidate.trials[1].quality.businessClarity = 10
+        $Root = Join-Path $Fixture.repository 'benchmarks/efficiency'
+        if ($Format -eq 'direct') {
+            $Raw = New-TestRawEvidence @{ repository = $Fixture.repository; record = $Candidate; revision = $Fixture.revision; compatibility = $Fixture.compatibility }
+            $Scored = Export-BenchmarkScore -Repository $Fixture.repository -TrialDirectories $Raw.directories -SeriesId 'score-regression' -OutputDirectory $Root -SelectCurrent
+            $Scored.evidence.schemaVersion | Should -Be 'benchmark-observation-series-v1'
+            $Scored.evidence.provenance.collector | Should -Be 'benchmark-score-direct-v1'
+        } else { $null = Export-BenchmarkScore -Repository $Fixture.repository -Evidence $Candidate -SeriesId 'score-regression' -OutputDirectory $Root -SelectCurrent }
+        $Head = Save-TestCommit $Fixture.repository
+        $Result = Write-BenchmarkCandidateReport -Repository $Fixture.repository -HeadRef $Head -BaseRef $Base -OutputDirectory (Join-Path $TestDrive 'regression-score')
+        $Result.comparison.status | Should -Be regression
+        $Result.exitCode | Should -Be 3
+        $Result.score.value | Should -Be 90
+    }
+}
+
 Describe 'Portable benchmark history and reporting' {
+    It 'preserves incomplete quality and exact known accounting without changing private evidence' {
+        $Fixture = New-TestRepository; $Raw = New-TestRawEvidence $Fixture
+        $Credits = @(162.6594435d, 299.2325385d, 395.4756795d)
+        $JudgeCredits = @(0d, 4.7196500d, 8.6539000d)
+        for ($Index = 0; $Index -lt 3; $Index++) {
+            $Raw.runs[$Index].metrics.credits.used = $Credits[$Index]
+            if ($Index -eq 0) {
+                $Raw.runs[$Index].judge = @{ valid = $false; reason = 'missing-or-oversized-document' }
+                $Raw.runs[$Index].workflow.passed = $false; $Raw.runs[$Index].completed = $false
+                Remove-Item (Join-Path $Raw.directories[$Index] 'workspace/docs/requirements/*.md')
+            } else { $Raw.runs[$Index].judge.metrics.credits.used = $JudgeCredits[$Index] }
+            Write-TestJson (Join-Path $Raw.directories[$Index] 'out/run.json') $Raw.runs[$Index]
+        }
+        $Hashes = @($Raw.directories | ForEach-Object { (Get-FileHash (Join-Path $_ 'out/run.json')).Hash.ToLowerInvariant() })
+        $Record = Export-BenchmarkCampaign $Fixture.repository $Raw.directories 'incomplete'
+        $Record.trials[0].quality | Should -BeNullOrEmpty
+        $Record.trials[0].judge | Should -BeNullOrEmpty
+        $Record.trials[0].documents.brd | Should -BeNullOrEmpty
+        $Record.trials[0].accounting.totalCredits | Should -BeNullOrEmpty
+        $Record.trials[0].unavailable | Should -Be @('judge-unavailable', 'quality-unavailable', 'missing-brd', 'missing-prd')
+        $Report = ConvertFrom-BenchmarkJson ([IO.File]::ReadAllBytes((Join-Path $Fixture.repository 'benchmarks/efficiency/campaign-report.json')))
+        $Report.summary.knownCredits | Should -Be 870.7412115d
+        $Report.summary.completeTrialCreditsSubtotal | Should -Be 708.0817680d
+        $Report.summary.totalCredits | Should -BeNullOrEmpty
+        $Report.summary.qualityMedian | Should -BeNullOrEmpty
+        $Record.trials.evidence.runHash | Should -Be $Hashes
+        @($Raw.directories | ForEach-Object { (Get-FileHash (Join-Path $_ 'out/run.json')).Hash.ToLowerInvariant() }) | Should -Be $Hashes
+        (ConvertTo-BenchmarkCanonicalJson $Record) | Should -Not -Match 'PRIVATE|sessionId|reviewPath|EXPLANATION'
+        { Export-BenchmarkSeries $Fixture.repository $Raw.control $Raw.directories 'strict-incomplete' } | Should -Throw
+    }
+    It 'rejects tampered event and document evidence and campaign pointer digests' {
+        $Fixture = New-TestRepository; $Raw = New-TestRawEvidence $Fixture
+        $Document = Join-Path $Raw.directories[0] 'workspace/docs/requirements/brd.md'
+        [IO.File]::WriteAllText($Document, 'changed')
+        { Export-BenchmarkCampaign $Fixture.repository $Raw.directories 'bad-document' } | Should -Throw '*document-digest*'
+        [IO.File]::WriteAllText($Document, 'brd document')
+        $Event = Join-Path $Raw.directories[0] 'out/build-events.jsonl'
+        [IO.File]::WriteAllText($Event, 'changed')
+        { Export-BenchmarkCampaign $Fixture.repository $Raw.directories 'bad-event' } | Should -Throw '*workflow-events-digest*'
+        [IO.File]::WriteAllText($Event, 'build PRIVATE EVENTS')
+        $null = Export-BenchmarkCampaign $Fixture.repository $Raw.directories 'valid-campaign'
+        $PointerPath = Join-Path $Fixture.repository 'benchmarks/efficiency/latest-campaign.json'
+        $Pointer = ConvertFrom-BenchmarkJson ([IO.File]::ReadAllBytes($PointerPath)); $Pointer.sha256 = '0' * 64
+        Write-TestJson $PointerPath $Pointer
+        $Head = Save-TestCommit $Fixture.repository
+        { Get-BenchmarkCampaignSelection $Fixture.repository $Head } | Should -Throw '*campaign-pointer-digest*'
+    }
+    It 'exposes campaigns without selecting or comparing them as complete series' {
+        $Fixture = New-TestRepository; $Raw = New-TestRawEvidence $Fixture
+        $Base = Save-TestSelection $Fixture $Fixture.record
+        $Record = Export-BenchmarkCampaign $Fixture.repository $Raw.directories 'observations'
+        $Head = Save-TestCommit $Fixture.repository
+        (Get-BenchmarkSelection $Fixture.repository $Head).record.seriesId | Should -Be $Fixture.record.seriesId
+        { Assert-BenchmarkSeries $Record } | Should -Throw
+        $Report = Compare-BranchBenchmark $Fixture.repository $Base $Head
+        $Report.status | Should -Be 'not-evaluable'
+        $Report.exitCode | Should -Be 2
+        $Report.headCampaign.campaignId | Should -Be 'observations'
+        $Report.deltas.Count | Should -Be 0
+        Write-BenchmarkReport $Report (Join-Path $TestDrive 'campaign-comparison')
+        [IO.File]::ReadAllText((Join-Path $TestDrive 'campaign-comparison/report.md')) | Should -Match 'Latest head campaign'
+        $null = Export-BenchmarkSeries $Fixture.repository $Raw.control $Raw.directories 'complete-supersedes-observation' -SelectCurrent
+        Test-Path (Join-Path $Fixture.repository 'benchmarks/efficiency/latest-campaign.json') | Should -BeFalse
+        Test-Path (Join-Path $Fixture.repository 'benchmarks/efficiency/campaigns/observations.json') | Should -BeTrue
+    }
+    It 'never overwrites a campaign or its immutable original bytes' {
+        $Fixture = New-TestRepository; $Raw = New-TestRawEvidence $Fixture
+        $null = Export-BenchmarkCampaign $Fixture.repository $Raw.directories 'immutable'
+        $Path = Join-Path $Fixture.repository 'benchmarks/efficiency/campaigns/immutable.json'
+        $Before = (Get-FileHash $Path).Hash
+        { Export-BenchmarkCampaign $Fixture.repository $Raw.directories 'immutable' } | Should -Throw
+        (Get-FileHash $Path).Hash | Should -BeExactly $Before
+        $Base = Save-TestCommit $Fixture.repository
+        [IO.File]::AppendAllText($Path, ' ')
+        $Head = Save-TestCommit $Fixture.repository
+        { Assert-BenchmarkHistory $Fixture.repository $Base $Head } | Should -Throw '*historical-record-modified*'
+    }
+    It 'shows only independently validated observations for <Case> without paired comparisons' -ForEach @(
+        @{ Case = 'absent-base'; Status = 'missing-baseline'; BaseVisible = $false; HeadVisible = $true },
+        @{ Case = 'legacy-base'; Status = 'stale-record'; BaseVisible = $true; HeadVisible = $true },
+        @{ Case = 'unsupported-base'; Status = 'invalid-record'; BaseVisible = $false; HeadVisible = $true },
+        @{ Case = 'corrupt-base'; Status = 'invalid-record'; BaseVisible = $false; HeadVisible = $true },
+        @{ Case = 'broken-base-schema'; Status = 'invalid-record'; BaseVisible = $false; HeadVisible = $true },
+        @{ Case = 'incompatible'; Status = 'incompatible'; BaseVisible = $true; HeadVisible = $true },
+        @{ Case = 'absent-head'; Status = 'missing-candidate'; BaseVisible = $true; HeadVisible = $false },
+        @{ Case = 'corrupt-head'; Status = 'invalid-record'; BaseVisible = $true; HeadVisible = $false },
+        @{ Case = 'stale-head'; Status = 'stale-record'; BaseVisible = $true; HeadVisible = $true },
+        @{ Case = 'missing-base-ref'; Status = 'operational-error'; BaseVisible = $false; HeadVisible = $true }
+    ) {
+        $Fixture = New-TestRepository
+        $Baseline = Copy-Value $Fixture.record
+        if ($Case -eq 'legacy-base') {
+            $Baseline.schemaVersion = 'benchmark-series-v1'; $Baseline.protocol.Remove('converterHash')
+            $Baseline.provenance.collector = 'benchmark-export-v1'; $Baseline.provenance.verifierHashBasis = 'measured-git-revision'
+        }
+        if ($Case -eq 'unsupported-base') { $Baseline.schemaVersion = 'benchmark-series-v0' }
+        if ($Case -eq 'broken-base-schema') { $Baseline.trials[0].quality.businessClarity = 'not-numeric' }
+        $Base = Save-TestSelection $Fixture $Baseline
+        if ($Case -eq 'absent-base') { $Base = $Fixture.revision }
+        if ($Case -eq 'missing-base-ref') { $Base = 'does-not-exist' }
+        if ($Case -eq 'corrupt-base') {
+            $PointerPath = Join-Path $Fixture.repository 'benchmarks/efficiency/current.json'
+            $Pointer = ConvertFrom-BenchmarkJson ([IO.File]::ReadAllBytes($PointerPath)); $Pointer.sha256 = '0' * 64
+            Write-TestJson $PointerPath $Pointer
+            $Base = Save-TestCommit $Fixture.repository
+        }
+        $Candidate = New-TestCandidate $Fixture.record
+        if ($Case -eq 'incompatible') { $Candidate.protocol.model = 'other-model' }
+        $Head = Save-TestSelection $Fixture $Candidate
+        if ($Case -eq 'absent-head') {
+            Remove-Item (Join-Path $Fixture.repository 'benchmarks/efficiency/current.json')
+            $Head = Save-TestCommit $Fixture.repository
+        }
+        if ($Case -eq 'corrupt-head') {
+            $PointerPath = Join-Path $Fixture.repository 'benchmarks/efficiency/current.json'
+            $Pointer = ConvertFrom-BenchmarkJson ([IO.File]::ReadAllBytes($PointerPath)); $Pointer.sha256 = '0' * 64
+            Write-TestJson $PointerPath $Pointer
+            $Head = Save-TestCommit $Fixture.repository
+        }
+        if ($Case -eq 'stale-head') {
+            [IO.File]::WriteAllText((Join-Path $Fixture.repository 'squad-src/charter.md'), 'new source')
+            $Head = Save-TestCommit $Fixture.repository
+        }
+        $Report = Compare-BranchBenchmark $Fixture.repository $Base $Head
+        $Report.status | Should -Be $Status
+        $Report.exitCode | Should -Be $(if ($Status -eq 'operational-error') { 1 } else { 2 })
+        ($null -ne $Report.baseStatistics) | Should -Be $BaseVisible
+        ($null -ne $Report.headStatistics) | Should -Be $HeadVisible
+        $Report.deltas.Count | Should -Be 0
+        $Output = Join-Path $TestDrive "resilient-$Case"
+        Write-BenchmarkReport $Report $Output
+        $Text = [IO.File]::ReadAllText((Join-Path $Output 'report.md'))
+        $Text | Should -Match 'not a 1:1 comparison'
+        $Text | Should -Not -Match '\| Change|Change %|faster|slower|regression detected'
+        if ($HeadVisible) { $Text | Should -Match 'Head observations[\s\S]*Document quality median' }
+    }
+    It 'historically permits only the five disclosed environment differences without normalizing records' {
+        $Fixture = New-TestRepository; $Candidate = New-TestCandidate $Fixture.record
+        $Changes = @{ installHash = ('b' * 64); powershell = '99.0.0'; cliVersion = '9.9.9'; maxCredits = 600; roleModelPolicyHash = ('c' * 64) }
+        foreach ($Key in $Changes.Keys) { $Candidate.protocol[$Key] = $Changes[$Key] }
+        $Before = ConvertTo-BenchmarkCanonicalJson $Fixture.record
+        $After = ConvertTo-BenchmarkCanonicalJson $Candidate
+        { Compare-BenchmarkSeries $Fixture.record $Candidate $Policy } | Should -Throw '*compatibility-*'
+        { Compare-BenchmarkSeries $Fixture.record $Candidate $Policy -DeploymentComparison } | Should -Throw '*compatibility-*'
+        $Comparison = Compare-BenchmarkSeries $Fixture.record $Candidate $Policy -HistoricalReference
+        $Comparison.exitCode | Should -Be 0
+        $Comparison.protocolDifferences.Count | Should -Be 5
+        foreach ($Key in $Changes.Keys) {
+            $Comparison.protocolDifferences[$Key].old | Should -BeExactly $Fixture.record.protocol[$Key]
+            $Comparison.protocolDifferences[$Key].new | Should -BeExactly $Changes[$Key]
+        }
+        $Report = Compare-BranchBenchmark $Fixture.repository main
+        foreach ($Key in $Comparison.Keys) { $Report[$Key] = $Comparison[$Key] }
+        $Output = Join-Path $TestDrive 'historical-report'
+        Write-BenchmarkReport $Report $Output
+        $Json = ConvertFrom-BenchmarkJson ([IO.File]::ReadAllBytes((Join-Path $Output 'report.json')))
+        $Json.comparisonWarning | Should -Match 'Approximate historical'
+        $Markdown = [IO.File]::ReadAllText((Join-Path $Output 'report.md'))
+        foreach ($Key in $Changes.Keys) {
+            $Markdown | Should -Match ([regex]::Escape([string]$Changes[$Key]))
+            $Markdown | Should -Match ([regex]::Escape([string]$Fixture.record.protocol[$Key]))
+        }
+        (ConvertTo-BenchmarkCanonicalJson $Fixture.record) | Should -BeExactly $Before
+        (ConvertTo-BenchmarkCanonicalJson $Candidate) | Should -BeExactly $After
+        $SameProtocol = New-TestCandidate $Fixture.record
+        (Compare-BenchmarkSeries $Fixture.record $SameProtocol $Policy -HistoricalReference).comparisonWarning | Should -Match 'Approximate historical'
+        $InstallOnly = New-TestCandidate $Fixture.record; $InstallOnly.protocol.installHash = 'b' * 64
+        (Compare-BenchmarkSeries $Fixture.record $InstallOnly $Policy -DeploymentComparison).exitCode | Should -Be 0
+    }
+    It 'historically rejects every non-allowlisted protocol difference with unchanged regression reducers' {
+        $Fixture = New-TestRepository
+        foreach ($Key in $Fixture.record.protocol.Keys | Where-Object { $_ -cnotin @('installHash', 'powershell', 'cliVersion', 'maxCredits', 'roleModelPolicyHash') }) {
+            $Candidate = New-TestCandidate $Fixture.record
+            $Candidate.protocol[$Key] = if ($Candidate.protocol[$Key] -is [ValueType]) { $Candidate.protocol[$Key] + 1 }
+                elseif ($Key.EndsWith('Hash')) { '0' * 64 } else { 'different-protocol' }
+            { Compare-BenchmarkSeries $Fixture.record $Candidate $Policy -HistoricalReference } | Should -Throw
+        }
+    }
     It 'exports only validated numeric evidence and never overwrites a series' {
         $Fixture = New-TestRepository; $Raw = New-TestRawEvidence $Fixture
         $Record = Export-BenchmarkSeries -Repository $Fixture.repository -ControlPath $Raw.control -TrialDirectories $Raw.directories -SeriesId safe-series -SelectCurrent
@@ -238,6 +559,71 @@ Describe 'Portable benchmark history and reporting' {
         { Export-BenchmarkSeries -Repository $Fixture.repository -ControlPath $Raw.control -TrialDirectories $Raw.directories -SeriesId bad-execution } |
             Should -Throw '*measured-protocol-mismatch*'
     }
+    It 'admits an identical executing protocol from a separate clean checkout despite unrelated dirt' {
+        $Fixture = New-TestRepository
+        [IO.File]::WriteAllText((Join-Path $Fixture.repository 'notes.txt'), 'unmeasured change')
+        $Pin = Get-BenchmarkExecutionIdentity -Repository $Fixture.repository -Compatibility $Fixture.compatibility -SourceHash $Fixture.record.sourceHash
+        $Pin.revision | Should -Be $Fixture.revision
+        $Pin.sourceHash | Should -Be $Fixture.record.sourceHash
+        { Get-BenchmarkExecutionIdentity -Repository $Fixture.repository -Compatibility $Fixture.compatibility -SourceHash $Fixture.record.sourceHash -ExpectedIdentity $Pin } | Should -Not -Throw
+    }
+    It 'rejects the measured <Digest> mismatch before a paid launch' -ForEach @(
+        @{ Digest = 'scenarioHash' }, @{ Digest = 'parserHash' }, @{ Digest = 'exerciseHash' },
+        @{ Digest = 'preparationHash' }, @{ Digest = 'graderHash' }, @{ Digest = 'verifierHash' }, @{ Digest = 'converterHash' }
+    ) {
+        $Fixture = New-TestRepository
+        $Compatibility = Copy-Value $Fixture.compatibility
+        $Compatibility[$Digest] = '0' * 64
+        $Launches = [Collections.Generic.List[string]]::new()
+        {
+            $null = Get-BenchmarkExecutionIdentity -Repository $Fixture.repository -Compatibility $Compatibility -SourceHash $Fixture.record.sourceHash
+            $Launches.Add('paid')
+        } | Should -Throw '*measured-protocol-mismatch*'
+        $Launches.Count | Should -Be 0
+    }
+    It 'rejects tracked and untracked measured source changes without requiring a clean worktree globally' {
+        $Fixture = New-TestRepository
+        Import-Module (Join-Path $PSScriptRoot 'EfficiencyBenchmark.psm1') -Force
+        foreach ($Name in @('charter.md', 'extra.md')) {
+            [IO.File]::WriteAllText((Join-Path $Fixture.repository "squad-src/$Name"), 'changed')
+            $Hash = Get-EfficiencyTreeHash (Join-Path $Fixture.repository 'squad-src')
+            { Get-BenchmarkExecutionIdentity -Repository $Fixture.repository -Compatibility $Fixture.compatibility -SourceHash $Hash } | Should -Throw '*measured-source-mismatch*'
+        }
+    }
+    It 'rejects movement of the pinned revision, source or installed identity' {
+        $Fixture = New-TestRepository
+        $Pin = Get-BenchmarkExecutionIdentity -Repository $Fixture.repository -Compatibility $Fixture.compatibility -SourceHash $Fixture.record.sourceHash
+        $Changed = Copy-Value $Fixture.compatibility; $Changed.installHash = '0' * 64
+        { Get-BenchmarkExecutionIdentity -Repository $Fixture.repository -Compatibility $Changed -SourceHash $Fixture.record.sourceHash -ExpectedIdentity $Pin } | Should -Throw '*execution-identity-drift*'
+        { Get-BenchmarkExecutionIdentity -Repository $Fixture.repository -Compatibility $Fixture.compatibility -SourceHash ('0' * 64) -ExpectedIdentity $Pin } | Should -Throw '*execution-identity-drift*'
+        [IO.File]::WriteAllText((Join-Path $Fixture.repository 'notes.txt'), 'new commit')
+        $null = Save-TestCommit $Fixture.repository
+        { Get-BenchmarkExecutionIdentity -Repository $Fixture.repository -Compatibility $Fixture.compatibility -SourceHash $Fixture.record.sourceHash -ExpectedIdentity $Pin } | Should -Throw '*execution-identity-drift*'
+    }
+    It 'requires retained controls to bind to their own available committed objects' {
+        $Fixture = New-TestRepository; $Raw = New-TestRawEvidence $Fixture
+        { Assert-BenchmarkRecordedIdentity -Repository $Fixture.repository -Run $Raw.runs[0] } | Should -Not -Throw
+        $Bad = Copy-Value $Raw.runs[0]; $Bad.metadata.compatibility.graderHash = '0' * 64
+        { Assert-BenchmarkRecordedIdentity -Repository $Fixture.repository -Run $Bad } | Should -Throw '*measured-protocol-mismatch*'
+        $Bad = Copy-Value $Raw.runs[0]; $Bad.metadata.sourceHash = '0' * 64
+        { Assert-BenchmarkRecordedIdentity -Repository $Fixture.repository -Run $Bad } | Should -Throw '*measured-source-mismatch*'
+        $Bad.metadata.revision = '1' * 40
+        { Assert-BenchmarkRecordedIdentity -Repository $Fixture.repository -Run $Bad } | Should -Throw
+    }
+    It 'refuses a local diagnostic renamed to run.json in the <Exporter> exporter' -ForEach @(
+        @{ Exporter = 'series' }, @{ Exporter = 'campaign' }
+    ) {
+        $Fixture = New-TestRepository; $Raw = New-TestRawEvidence $Fixture
+        $Raw.runs[0].localDiagnostic = $true
+        $Raw.runs[0] | ConvertTo-Json -Depth 45 | Set-Content -LiteralPath (Join-Path $Raw.directories[0] 'out/run.json')
+        Write-TestJson $Raw.control @{ schemaVersion = 'efficiency-control-v1'; runs = $Raw.runs }
+        if ($Exporter -eq 'series') {
+            { Export-BenchmarkSeries -Repository $Fixture.repository -ControlPath $Raw.control -TrialDirectories $Raw.directories -SeriesId 'local-must-not-export' } | Should -Throw '*raw-observation*'
+        }
+        else {
+            { Export-BenchmarkCampaign -Repository $Fixture.repository -TrialDirectories $Raw.directories -CampaignId 'local-must-not-export' } | Should -Throw '*raw-observation*'
+        }
+    }
     It 'reads legacy records historically but explicitly refuses them as current snapshot evidence' {
         $Fixture = New-TestRepository
         $Legacy = Copy-Value $Fixture.record
@@ -278,6 +664,7 @@ Describe 'Portable benchmark history and reporting' {
         $Candidate = New-TestCandidate $Fixture.record
         $Candidate.trials[1].runId = $Fixture.record.trials[1].runId
         { Compare-BenchmarkSeries $Fixture.record $Candidate $Policy } | Should -Throw '*overlapping-independent-evidence*'
+        { Compare-BenchmarkSeries $Fixture.record $Candidate $Policy -HistoricalReference } | Should -Throw '*overlapping-independent-evidence*'
         $Candidate = New-TestCandidate $Fixture.record; $Candidate.protocol.model = 'different-model'
         { Compare-BenchmarkSeries $Fixture.record $Candidate $Policy } | Should -Throw '*incompatible:compatibility-model*'
         $Candidate = New-TestCandidate $Fixture.record
@@ -300,8 +687,12 @@ Describe 'Portable benchmark history and reporting' {
         $Result = Compare-BranchBenchmark $Fixture.repository $Base $Head
         $Result.status | Should -Be 'no-regression'
         $Result.improvementScreen | Should -BeFalse
+        (Compare-BenchmarkSeries $Fixture.record $Candidate $Policy -HistoricalReference).status | Should -Be 'no-regression'
+        foreach ($Trial in $Candidate.trials) { $Trial.workflow.credits = 115 }
+        (Compare-BenchmarkSeries $Fixture.record $Candidate $Policy -HistoricalReference).status | Should -Be 'no-regression'
         foreach ($Trial in $Candidate.trials) { $Trial.workflow.credits = 116 }
         (Compare-BenchmarkSeries $Fixture.record $Candidate $Policy).status | Should -Be 'regression'
+        (Compare-BenchmarkSeries $Fixture.record $Candidate $Policy -HistoricalReference).status | Should -Be 'regression'
     }
     It 'separates a 10 percent improvement screen from quality and reliability gates' {
         $Fixture = New-TestRepository; $Candidate = New-TestCandidate $Fixture.record
@@ -310,9 +701,14 @@ Describe 'Portable benchmark history and reporting' {
         $Result.improvementScreen | Should -BeTrue
         $Result.reasons | Should -Contain 'quality-businessClarity'
         $Result.status | Should -Be 'regression'
+        $HistoricalResult = Compare-BenchmarkSeries $Fixture.record $Candidate $Policy -HistoricalReference
+        $HistoricalResult.improvementScreen | Should -BeTrue
+        $HistoricalResult.reasons | Should -Contain 'quality-businessClarity'
+        $HistoricalResult.status | Should -Be 'regression'
         $Candidate.trials[0].outcomes['init/stateVerifier'] = $false
         $Candidate.trials[0].outcomes['stage/init'] = $false; $Candidate.trials[0].outcomes.completed = $false
         (Compare-BenchmarkSeries $Fixture.record $Candidate $Policy).reasons | Should -Contain 'outcome-init/stateVerifier'
+        (Compare-BenchmarkSeries $Fixture.record $Candidate $Policy -HistoricalReference).reasons | Should -Contain 'outcome-init/stateVerifier'
     }
     It 'counts an outlying failure and critical findings with sums not medians' {
         $Fixture = New-TestRepository; $Candidate = New-TestCandidate $Fixture.record
@@ -321,6 +717,10 @@ Describe 'Portable benchmark history and reporting' {
         $Result.headStatistics.resources.total.failedTools.median | Should -Be 0
         $Result.reasons | Should -Contain 'failed-tools-sum'
         $Result.reasons | Should -Contain 'critical-high-sum'
+        $HistoricalResult = Compare-BenchmarkSeries $Fixture.record $Candidate $Policy -HistoricalReference
+        $HistoricalResult.headStatistics.resources.total.failedTools.median | Should -Be 0
+        $HistoricalResult.reasons | Should -Contain 'failed-tools-sum'
+        $HistoricalResult.reasons | Should -Contain 'critical-high-sum'
     }
     It 'does not divide by zero and leaves missing optional metrics unknown' {
         $Fixture = New-TestRepository; $Candidate = New-TestCandidate $Fixture.record
@@ -427,8 +827,9 @@ Describe 'Portable benchmark history and reporting' {
     It 'keeps the report workflow read-only with verified base execution and bootstrap failure' {
         $Workflow = [IO.File]::ReadAllText((Join-Path $SourceRoot '.github/workflows/tier2-benchmark.yml'))
         $Workflow | Should -Match 'contents: read'
-        $Workflow | Should -Not -Match 'pull_request_target|secrets\.|contents: write|COPILOT_'
-        $Workflow | Should -Match 'ref: \$\{\{ steps.refs.outputs.base \}\}'
+        $Workflow | Should -Not -Match 'pull_request_target|contents: write'
+        $Workflow | Should -Match 'ref: \$\{\{ steps.refs.outputs.controller \}\}'
+        $Workflow | Should -Match 'COPILOT_GITHUB_TOKEN: \$\{\{ secrets.COPILOT_GITHUB_TOKEN \}\}'
         $Workflow | Should -Match 'persist-credentials: false'
         $Workflow | Should -Match 'base-comparison-tooling-unavailable'
         $Workflow | Should -Match 'FETCH_HEAD'
@@ -439,9 +840,192 @@ Describe 'Portable benchmark history and reporting' {
         $Workflow | Should -Match 'workflow_call:'
         $Release = [IO.File]::ReadAllText((Join-Path $SourceRoot '.github/workflows/release.yml'))
         $Release | Should -Match 'needs: \[candidate, benchmark\]'
-        $Release | Should -Match 'uses: ./\.github/workflows/tier2-benchmark.yml'
+        $Release | Should -Match 'uses: ./\.github/workflows/tier2-recorded-benchmark.yml'
+        $Release | Should -Not -Match 'tier2-benchmark\.yml|COPILOT_GITHUB_TOKEN|secrets: |refresh_reference|Assert-ReleaseBenchmarkPublication'
         $Readme = [IO.File]::ReadAllText((Join-Path $SourceRoot 'README.md'))
         $Readme | Should -Match '\]\(benchmarks/efficiency/badge.svg\)\]\(benchmarks/efficiency/report.md\)'
+    }
+}
+
+Describe 'Hosted legacy-base report integration' {
+    BeforeAll {
+        function Get-RecordedWorkflowScript([string]$Name) {
+            $Lines = [IO.File]::ReadAllLines((Join-Path $SourceRoot '.github/workflows/tier2-recorded-benchmark.yml'))
+            $Start = [array]::FindIndex($Lines, [Predicate[string]]{ param($Line) $Line -ceq "      - name: $Name" })
+            if ($Start -lt 0) { throw "Workflow step unavailable: $Name" }
+            while ($Lines[$Start] -cne '        run: |') { $Start++ }
+            $Body = [Collections.Generic.List[string]]::new()
+            for ($Index = $Start + 1; $Index -lt $Lines.Count; $Index++) {
+                if ($Lines[$Index] -and -not $Lines[$Index].StartsWith('          ')) { break }
+                $Body.Add($(if ($Lines[$Index]) { $Lines[$Index].Substring(10) } else { '' }))
+            }
+            # Match the hosted pwsh wrapper's native-status propagation.
+            ($Body -join "`n") + "`nif (Test-Path variable:LASTEXITCODE) { exit `$LASTEXITCODE }`n"
+        }
+    }
+    It 'never turns a strict failure or unavailable observation into success for <Case>' -ForEach @(
+        @{ Case = 'strict-failure'; Strict = '2'; Outcome = 'success'; Render = '0'; Expected = 2 },
+        @{ Case = 'strict-regression'; Strict = '3'; Outcome = 'success'; Render = '2'; Expected = 3 },
+        @{ Case = 'incomplete-after-old-success'; Strict = '0'; Outcome = 'success'; Render = '2'; Expected = 2 },
+        @{ Case = 'report-failed'; Strict = '0'; Outcome = 'failure'; Render = ''; Expected = 1 },
+        @{ Case = 'missing-report-verdict'; Strict = '0'; Outcome = 'success'; Render = ''; Expected = 1 },
+        @{ Case = 'both-validated'; Strict = '0'; Outcome = 'success'; Render = '0'; Expected = 0 }
+    ) {
+        $Script = Join-Path $TestDrive "verdict-$Case.ps1"
+        [IO.File]::WriteAllText($Script, (Get-RecordedWorkflowScript 'Propagate comparison verdict'))
+        $Original = @($env:VERDICT, $env:REPORT_OUTCOME, $env:REPORT_VERDICT)
+        try {
+            $env:VERDICT = $Strict; $env:REPORT_OUTCOME = $Outcome; $env:REPORT_VERDICT = $Render
+            & pwsh -NoProfile -File $Script
+            $LASTEXITCODE | Should -Be $Expected
+        } finally {
+            $env:VERDICT = $Original[0]; $env:REPORT_OUTCOME = $Original[1]; $env:REPORT_VERDICT = $Original[2]
+        }
+    }
+    It 'runs exact hosted scripts against legacy 3504ffc and merged a64ee85 for <Case>' -ForEach @(
+        @{ Case = 'standalone-legacy'; ExpectedRenderExit = 0; CurrentCampaign = $false },
+        @{ Case = 'standalone-reviewed-score'; ExpectedRenderExit = 0; CurrentCampaign = $false },
+        @{ Case = 'standalone-invalid-candidate'; ExpectedRenderExit = 0; CurrentCampaign = $false },
+        @{ Case = 'standalone-wrong-reporter'; ExpectedRenderExit = 0; CurrentCampaign = $false },
+        @{ Case = 'current-incomplete'; ExpectedRenderExit = 0; CurrentCampaign = $true },
+        @{ Case = 'wrong-reporter'; ExpectedRenderExit = 1; CurrentCampaign = $false },
+        @{ Case = 'changed-source'; ExpectedRenderExit = 0; CurrentCampaign = $false },
+        @{ Case = 'corrupt-campaign'; ExpectedRenderExit = 0; CurrentCampaign = $false }
+    ) {
+        if ($Case.StartsWith('standalone-')) {
+            $Fixture = New-TestRepository
+            $Root = $Fixture.repository
+            $Head = Save-TestSelection $Fixture $Fixture.record
+            if ($Case -eq 'standalone-reviewed-score') {
+                $null = Export-BenchmarkScore -Repository $Root -Evidence $Fixture.record -SeriesId 'new-schema' -OutputDirectory (Join-Path $Root 'benchmarks/efficiency') -SelectCurrent
+                $Head = Save-TestCommit $Root
+            }
+            $Engine = Join-Path $Root '.benchmark-score-engine'
+            [void](Invoke-TestGit $SourceRoot @('clone', '--quiet', '--shared', '--no-checkout', $SourceRoot, $Engine))
+            $Reporter = if ($Case -eq 'standalone-wrong-reporter') { '019c894bb0430802f47d2fc513fe326bec4023d2' } else { '8a0233d3c55ff18f056d02bb5623dcea52991ec8' }
+            [void](Invoke-TestGit $Engine @('checkout', '--quiet', '--detach', $Reporter))
+            $Script = Join-Path $TestDrive "$Case.ps1"
+            # Route only the fetch to fixture objects: no hosted API, parent or network.
+            $Prefix = @'
+$NativeGit = (Get-Command git -CommandType Application | Select-Object -First 1).Source
+function git {
+    if ($args -contains 'fetch') {
+        & $NativeGit -C $args[1] -c core.hooksPath=/dev/null fetch --no-tags --no-recurse-submodules -- '__REPOSITORY__' '__HEAD__'
+    } else { & $NativeGit @args }
+    $global:LASTEXITCODE = $LASTEXITCODE
+}
+'@
+            [IO.File]::WriteAllText($Script, $Prefix.Replace('__REPOSITORY__', $Root.Replace("'", "''")).Replace('__HEAD__', $Head) + "`n" + (Get-RecordedWorkflowScript 'Score candidate without parent discovery'))
+            $Names = @('CANDIDATE_SHA', 'GITHUB_EVENT_NAME', 'GITHUB_EVENT_PATH', 'GITHUB_REPOSITORY', 'GITHUB_OUTPUT', 'GITHUB_STEP_SUMMARY')
+            $Original = @{}; foreach ($Name in $Names) { $Original[$Name] = [Environment]::GetEnvironmentVariable($Name) }
+            try {
+                $env:CANDIDATE_SHA = if ($Case -eq 'standalone-invalid-candidate') { 'invalid' } else { $Head }
+                $env:GITHUB_EVENT_NAME = 'workflow_dispatch'; $env:GITHUB_REPOSITORY = 'fixture/offline'
+                $env:GITHUB_EVENT_PATH = Join-Path $TestDrive "$Case-event.json"; [IO.File]::WriteAllText($env:GITHUB_EVENT_PATH, '{}')
+                $env:GITHUB_OUTPUT = Join-Path $TestDrive "$Case-output"
+                $env:GITHUB_STEP_SUMMARY = Join-Path $TestDrive "$Case-summary"
+                Push-Location $Root
+                try {
+                    $Transcript = @(& pwsh -NoProfile -File $Script 2>&1)
+                    $LASTEXITCODE | Should -Be 0
+                    $Output = Join-Path $Root '.benchmark-score-public'
+                    $Result = ConvertFrom-BenchmarkJson ([IO.File]::ReadAllBytes((Join-Path $Output 'result.json')))
+                    $Result.parentRequired | Should -BeFalse
+                    $Scored = $Case -in @('standalone-legacy', 'standalone-reviewed-score')
+                    if ($Scored -and $Result.exitCode -ne 0) {
+                        throw "Hosted candidate scoring failed: $([IO.File]::ReadAllText((Join-Path $Output 'report.json'))) $($Transcript -join "`n")"
+                    }
+                    $Result.exitCode | Should -Be $(if ($Scored) { 0 } else { 1 }) -Because ($Transcript -join "`n")
+                    $Badge = [IO.File]::ReadAllText((Join-Path $Output 'badge.svg'))
+                    $Badge | Should -Match $(if ($Scored) { '100/100' } else { '0/100.*not judged' })
+                    $Digests = ConvertFrom-BenchmarkJson ([IO.File]::ReadAllBytes((Join-Path $Output 'sha256.json')))
+                    $Digests.Count | Should -Be 1
+                    foreach ($Path in $Digests.Keys) { (Get-FileHash (Join-Path $Output $Path)).Hash.ToLowerInvariant() | Should -Be $Digests[$Path] }
+                    if ($Case -eq 'standalone-reviewed-score') {
+                        $StoredPath = Join-Path $Output 'records/new-schema.json'
+                        $Stored = ConvertFrom-BenchmarkJson ([IO.File]::ReadAllBytes($StoredPath))
+                        $Stored.schemaVersion | Should -Be 'benchmark-score-v1'
+                        $Stored.score.value | Should -Be 100
+                        (Get-FileHash $StoredPath).Hash | Should -Be (Get-FileHash (Join-Path $Root 'benchmarks/efficiency/records/new-schema.json')).Hash
+                    }
+                    Test-Path (Join-Path $Output 'report.md') | Should -BeTrue
+                } finally { Pop-Location }
+            } finally { foreach ($Name in $Names) { [Environment]::SetEnvironmentVariable($Name, $Original[$Name]) } }
+            return
+        }
+        $Repository = Join-Path $TestDrive "hosted-$Case"
+        [void](Invoke-TestGit $SourceRoot @('clone', '--quiet', '--shared', '--no-checkout', $SourceRoot, $Repository))
+        $Base = '3504ffc79c687d3da104e9a40f04e270ac13d9c0'
+        $Head = 'a64ee85b52bbb62b47ea88af89585638c324ab37'
+        $Pinned = '019c894bb0430802f47d2fc513fe326bec4023d2'
+        if ($Case -in @('changed-source', 'corrupt-campaign')) {
+            [void](Invoke-TestGit $Repository @('checkout', '--quiet', '--detach', $Head))
+            if ($Case -eq 'changed-source') {
+                [IO.File]::WriteAllText((Join-Path $Repository 'squad-src/hosted-source-changed.md'), 'changed source')
+            } else {
+                $PointerPath = Join-Path $Repository 'benchmarks/efficiency/latest-campaign.json'
+                $Pointer = ConvertFrom-BenchmarkJson ([IO.File]::ReadAllBytes($PointerPath)); $Pointer.sha256 = '0' * 64
+                Write-TestJson $PointerPath $Pointer
+            }
+            $Head = Save-TestCommit $Repository
+        }
+        [void](Invoke-TestGit $Repository @('checkout', '--quiet', '--detach', $Base))
+        $Engine = Join-Path $Repository '.benchmark-report-engine'
+        [void](Invoke-TestGit $SourceRoot @('clone', '--quiet', '--shared', '--no-checkout', $SourceRoot, $Engine))
+        [void](Invoke-TestGit $Engine @('checkout', '--quiet', '--detach', $(if ($Case -eq 'wrong-reporter') { $Base } else { $Pinned })))
+        $CompareScript = Join-Path $TestDrive "compare-$Case.ps1"
+        $RenderScript = Join-Path $TestDrive "render-$Case.ps1"
+        [IO.File]::WriteAllText($CompareScript, (Get-RecordedWorkflowScript 'Compare or report missing baseline tooling'))
+        [IO.File]::WriteAllText($RenderScript, (Get-RecordedWorkflowScript 'Render observations with reviewed report implementation'))
+        $OriginalBase = $env:BASE_SHA; $OriginalHead = $env:HEAD_SHA; $OriginalOutput = $env:GITHUB_OUTPUT; $OriginalVerdict = $env:STRICT_VERDICT
+        try {
+            $env:BASE_SHA = $Base; $env:HEAD_SHA = $Head
+            $env:GITHUB_OUTPUT = Join-Path $TestDrive "github-output-$Case"
+            Push-Location $Repository
+            try {
+                & pwsh -NoProfile -File $CompareScript
+                $LASTEXITCODE | Should -Be 0
+                [IO.File]::ReadAllText($env:GITHUB_OUTPUT).Trim() | Should -Be 'verdict=2'
+                $env:STRICT_VERDICT = '2'
+                $Output = Join-Path $Repository '.benchmark-recorded-public'
+                $StrictPath = Join-Path $Output 'strict/report.json'
+                $StrictHash = (Get-FileHash $StrictPath).Hash
+                $Strict = ConvertFrom-BenchmarkJson ([IO.File]::ReadAllBytes($StrictPath))
+                $Strict.status | Should -Be 'stale-record'
+                $Strict.exitCode | Should -Be 2
+                $RenderOutput = @(& pwsh -NoProfile -File $RenderScript 2>&1)
+                $LASTEXITCODE | Should -Be $ExpectedRenderExit
+                (Get-FileHash $StrictPath).Hash | Should -BeExactly $StrictHash
+                $Report = ConvertFrom-BenchmarkJson ([IO.File]::ReadAllBytes((Join-Path $Output 'report.json')))
+                $Text = [IO.File]::ReadAllText((Join-Path $Output 'report.md'))
+                if ($CurrentCampaign) {
+                    $Report.status | Should -Be 'not-evaluable'
+                    $Report.reasons | Should -Be @('incomplete-observational-campaign')
+                    $Report.strictVerdict | Should -Be 2
+                    $Report.strictComparison.status | Should -Be 'stale-record'
+                    $Report.reportingEngine.revision | Should -BeExactly $Pinned
+                    $Text | Should -Match '^# Latest benchmark campaign'
+                    $Text | Should -Match '870.7412115'
+                    $Text | Should -Match '\| 1 \| unavailable'
+                    $Text | Should -Match '\| 2 \| 82'
+                    $Text | Should -Match '\| 3 \| 79'
+                    $Text | Should -Match 'Strict comparison \(unchanged gate\)'
+                    $Text | Should -Not -Match '\| Change|Change %|faster|slower'
+                } elseif ($Case -eq 'wrong-reporter') {
+                    $RenderOutput -join "`n" | Should -Match 'identity mismatch'
+                    (Get-FileHash (Join-Path $Output 'report.json')).Hash | Should -BeExactly $StrictHash
+                } else {
+                    $Report.exitCode | Should -Be 2
+                    $Report.status | Should -Be $(if ($Case -eq 'changed-source') { 'stale-record' } else { 'invalid-record' })
+                    $Text | Should -Not -Match '^# Latest benchmark campaign'
+                    if ($Case -eq 'corrupt-campaign') { $Report.headCampaign | Should -BeNullOrEmpty }
+                }
+                Test-Path (Join-Path $Output 'badge.svg') | Should -BeTrue
+            } finally { Pop-Location }
+        }
+        finally {
+            $env:BASE_SHA = $OriginalBase; $env:HEAD_SHA = $OriginalHead; $env:GITHUB_OUTPUT = $OriginalOutput; $env:STRICT_VERDICT = $OriginalVerdict
+        }
     }
 }
 
@@ -460,10 +1044,10 @@ Describe 'Pre-release benchmark gate' {
             throw 'run_benchmark must declare an explicit boolean default.'
         }
         $ConfiguredDefault = $Default.Groups[1].Value -ceq 'true'
-        $BenchmarkCondition = [regex]::Match($Release, '(?m)^    if: (github.event_name != .+inputs.run_benchmark != false)\s*$').Groups[1].Value
+        $BenchmarkCondition = [regex]::Match($Release, '(?ms)^  benchmark:\r?\n.*?^    if: ([^\r\n]+)').Groups[1].Value
         if (-not $BenchmarkCondition) { throw 'Missing benchmark admission condition.' }
         $Admission = [scriptblock]::Create($BenchmarkCondition.Replace('github.event_name', '$Event').
-            Replace('inputs.run_benchmark', '$Enabled').Replace('!=', '-ne').Replace('||', '-or').Replace('false', '$false'))
+            Replace('inputs.run_benchmark', '$Enabled').Replace('!=', '-ne').Replace('||', '-or').Replace('&&', '-and').Replace('false', '$false'))
     }
     It 'permits publication only for a passed gate or an explicitly skipped manual gate: <Event>/<Benchmark>/<Enabled>' -ForEach @(
         @{ Event='push'; Candidate='success'; Benchmark='success'; Enabled=$false; Expected=$true }
@@ -501,25 +1085,27 @@ Describe 'Pre-release benchmark gate' {
         $Prep | Should -Not -Match '(?m)^      run_benchmark:'
         $Dispatch = [regex]::Match($Prep, '(?m)^\s+gh workflow run release\.yml .+$').Value
         $Dispatch | Should -Match ([regex]::Escape('-f ref="$REF"'))
-        $Dispatch | Should -Not -Match 'run_benchmark'
+        $Dispatch | Should -Match '-f run_benchmark=true'
+        $Dispatch | Should -Not -Match 'refresh_reference=true'
     }
 }
 
 Describe 'Release benchmark event identities' {
     BeforeAll {
-        $WorkflowText = [IO.File]::ReadAllText((Join-Path $SourceRoot '.github/workflows/tier2-benchmark.yml'))
-        function Get-WorkflowRun([string]$Name) {
-            $Step = [regex]::Match($WorkflowText, '(?ms)^      - name: ' + [regex]::Escape($Name) + '\r?\n(.*?)(?=^      - name:|\z)').Groups[1].Value
+        $WorkflowText = [IO.File]::ReadAllText((Join-Path $SourceRoot '.github/workflows/tier2-recorded-benchmark.yml'))
+        function Get-WorkflowRun([string]$Name, [string]$Text = $WorkflowText) {
+            $Step = [regex]::Match($Text, '(?ms)^      - name: ' + [regex]::Escape($Name) + '\r?\n(.*?)(?=^      - name:|\z)').Groups[1].Value
             $Body = [regex]::Match($Step, '(?ms)^        run: \|\r?\n(.*)').Groups[1].Value
             if (-not $Body) { throw "Missing workflow script: $Name" }
             [scriptblock]::Create(($Body -replace '(?m)^          ', ''))
         }
         $ResolveRelease = Get-WorkflowRun 'Validate immutable event identities'
         $MissingBaseline = Get-WorkflowRun 'Compare or report missing baseline tooling'
+        $Bootstrap = Get-WorkflowRun 'Apply temporary release baseline bootstrap' ([IO.File]::ReadAllText((Join-Path $SourceRoot '.github/workflows/tier2-benchmark.yml')))
     }
     BeforeEach {
         $SavedEnvironment = @{}
-        foreach ($Name in @('GITHUB_REPOSITORY', 'GITHUB_API_URL', 'GITHUB_OUTPUT', 'GITHUB_EVENT_PATH', 'GH_TOKEN', 'RELEASE_TAG', 'CANDIDATE_SHA', 'RUNNER_TEMP', 'BASE_SHA', 'HEAD_SHA')) {
+        foreach ($Name in @('GITHUB_REPOSITORY', 'GITHUB_API_URL', 'GITHUB_OUTPUT', 'GITHUB_EVENT_PATH', 'GITHUB_EVENT_NAME', 'GH_TOKEN', 'RELEASE_TAG', 'CANDIDATE_SHA', 'SELECTED_BRANCH', 'RUNNER_TEMP', 'BASE_SHA', 'HEAD_SHA', 'VERDICT', 'GITHUB_STEP_SUMMARY', 'COLLECTION_REQUIRED')) {
             $SavedEnvironment[$Name] = [Environment]::GetEnvironmentVariable($Name)
         }
         $env:GITHUB_REPOSITORY = 'fixture/benchmark'
@@ -527,8 +1113,11 @@ Describe 'Release benchmark event identities' {
         $env:GITHUB_OUTPUT = Join-Path $TestDrive 'release-outputs'
         $env:GITHUB_EVENT_PATH = Join-Path $TestDrive 'release-event.json'
         $env:GH_TOKEN = 'fixture-only'
+        $env:GITHUB_EVENT_NAME = 'workflow_call'
         $env:RELEASE_TAG = 'v2'
         $env:CANDIDATE_SHA = ''
+        $env:COLLECTION_REQUIRED = ''
+        $env:SELECTED_BRANCH = 'feature/test'
         [IO.File]::WriteAllText($env:GITHUB_OUTPUT, '')
         $CurrentRelease = @{ id = 20; tag_name = 'v2'; draft = $false; prerelease = $false; published_at = '2026-10-20T00:00:00Z' }
         $PriorRelease = @{ id = 10; tag_name = 'v1'; draft = $false; prerelease = $false; published_at = '2026-10-18T00:00:00Z' }
@@ -552,6 +1141,10 @@ Describe 'Release benchmark event identities' {
         Mock Invoke-RestMethod {
             param($Uri)
             $Prefix = 'https://api.github.invalid/repos/fixture/benchmark/'
+            if ([string]$Uri -ceq $Prefix.TrimEnd('/')) {
+                $script:ReleaseCalls.Add('')
+                return $script:ReleaseApi['']
+            }
             if (-not ([string]$Uri).StartsWith($Prefix, [StringComparison]::Ordinal)) { throw 'Unexpected API host.' }
             $Path = ([string]$Uri).Substring($Prefix.Length)
             $script:ReleaseCalls.Add($Path)
@@ -589,6 +1182,49 @@ Describe 'Release benchmark event identities' {
         $env:CANDIDATE_SHA = '--help'
         { & $ResolveRelease } | Should -Throw '*immutable candidate SHA required*'
     }
+    It 'resolves pull request identity from the event for same-repository and fork heads' {
+        $env:GITHUB_EVENT_NAME = 'pull_request'
+        $env:RELEASE_TAG = ''
+        foreach ($HeadRepo in @('fixture/benchmark', 'contributor/benchmark-fork')) {
+            [IO.File]::WriteAllText($env:GITHUB_OUTPUT, '')
+            Write-TestJson $env:GITHUB_EVENT_PATH @{ pull_request = @{
+                base = @{ ref = 'main'; sha = ('a' * 40); repo = @{ full_name = 'fixture/benchmark' } }
+                head = @{ sha = ('b' * 40); repo = @{ full_name = $HeadRepo } } } }
+            & $ResolveRelease
+            $Output = [IO.File]::ReadAllText($env:GITHUB_OUTPUT)
+            $Output | Should -Match "(?m)^base=$('a' * 40)\r?$"
+            $Output | Should -Match "(?m)^head=$('b' * 40)\r?$"
+            $Output | Should -Match '(?m)^base_repository=fixture/benchmark\r?$'
+            $Output | Should -Match "(?m)^head_repository=$([regex]::Escape($HeadRepo))\r?$"
+        }
+        $script:ReleaseCalls.Count | Should -Be 0
+    }
+    It 'rejects pull request events with a foreign base, non-main target, or unsafe identities' {
+        $env:GITHUB_EVENT_NAME = 'pull_request'
+        foreach ($Case in @(
+            @{ Ref = 'main'; Base = 'other/benchmark'; Head = 'fixture/benchmark'; Sha = ('b' * 40); Error = '*must target main*' }
+            @{ Ref = 'release'; Base = 'fixture/benchmark'; Head = 'fixture/benchmark'; Sha = ('b' * 40); Error = '*must target main*' }
+            @{ Ref = 'main'; Base = 'fixture/benchmark'; Head = '--upload-pack=x'; Sha = ('b' * 40); Error = '*head repository identity*' }
+            @{ Ref = 'main'; Base = 'fixture/benchmark'; Head = 'fixture/benchmark'; Sha = 'HEAD'; Error = '*Full commit SHA required*' }
+        )) {
+            Write-TestJson $env:GITHUB_EVENT_PATH @{ pull_request = @{
+                base = @{ ref = $Case.Ref; sha = ('a' * 40); repo = @{ full_name = $Case.Base } }
+                head = @{ sha = $Case.Sha; repo = @{ full_name = $Case.Head } } } }
+            { & $ResolveRelease } | Should -Throw $Case.Error
+        }
+    }
+    It 'has exactly one pull request trigger, deduplicated per PR, and no second caller besides Release' {
+        $Triggers = [regex]::Matches($WorkflowText, '(?m)^  (pull_request|pull_request_target|push|schedule):').Value
+        $Triggers | Should -Be @('  pull_request:')
+        $WorkflowText | Should -Match '(?ms)^  pull_request:\r?\n    branches:\r?\n      - main\r?\n'
+        $WorkflowText | Should -Match "format\('pr-\{0\}', github\.event\.pull_request\.number\)"
+        $WorkflowText | Should -Match 'cancel-in-progress: true'
+        $WorkflowText | Should -Match 'persist-credentials: false'
+        $WorkflowText | Should -Not -Match 'COPILOT_GITHUB_TOKEN|secrets\.'
+        $Callers = Get-ChildItem (Join-Path $SourceRoot '.github/workflows') -Filter *.yml |
+            Where-Object { [IO.File]::ReadAllText($_.FullName) -match 'tier2-recorded-benchmark\.yml' -and $_.Name -ne 'tier2-recorded-benchmark.yml' }
+        @($Callers.Name) | Should -Be @('release.yml')
+    }
     It 'keeps manual full-SHA comparisons independent of release API lookups and rejects unsafe refs' {
         $env:RELEASE_TAG = ''
         Write-TestJson $env:GITHUB_EVENT_PATH @{ inputs = @{ base_sha = ('a' * 40); head_sha = ('b' * 40) } }
@@ -598,6 +1234,74 @@ Describe 'Release benchmark event identities' {
         Write-TestJson $env:GITHUB_EVENT_PATH @{ inputs = @{ base_sha = '--help'; head_sha = ('b' * 40) } }
         { & $ResolveRelease } | Should -Throw '*Full commit SHA required*'
     }
+    It 'defaults to the latest selected branch and its cross-repository PR parent' {
+        $env:RELEASE_TAG = ''
+        Write-TestJson $env:GITHUB_EVENT_PATH @{ inputs = @{ base_sha = ''; head_sha = '' } }
+        $script:ReleaseApi['branches/feature%2Ftest'] = @{ commit = @{ sha = 'a' * 40 } }
+        $script:ReleaseApi[''] = @{ fork = $false; default_branch = 'main' }
+        $script:ReleaseApi['pulls?state=open&head=fixture%3Afeature%2Ftest&per_page=100'] = @(
+            @{ base = @{ ref = 'integration/parent'; repo = @{ full_name = 'upstream/project' } } }
+        )
+        Mock Invoke-RestMethod {
+            param($Uri)
+            $text = [string]$Uri
+            if ($text -eq 'https://api.github.invalid/repos/upstream/project/branches/integration%2Fparent') {
+                return @{ commit = @{ sha = 'b' * 40 } }
+            }
+            if ($text -ceq 'https://api.github.invalid/repos/fixture/benchmark') { return $script:ReleaseApi[''] }
+            $path = $text.Substring('https://api.github.invalid/repos/fixture/benchmark/'.Length)
+            if (-not $script:ReleaseApi.ContainsKey($path)) { throw "Unexpected API request: $path" }
+            Write-Output -NoEnumerate $script:ReleaseApi[$path]
+        }
+        & $ResolveRelease
+        $output = [IO.File]::ReadAllText($env:GITHUB_OUTPUT)
+        $output | Should -Match "(?m)^head=$('a' * 40)\r?$"
+        $output | Should -Match "(?m)^base=$('b' * 40)\r?$"
+        $output | Should -Match '(?m)^base_repository=upstream/project\r?$'
+    }
+    It 'uses the default branch only without a PR and preserves individual overrides' {
+        $env:RELEASE_TAG = ''
+        $script:ReleaseApi[''] = @{ fork = $false; default_branch = 'main' }
+        $script:ReleaseApi['pulls?state=open&head=fixture%3Afeature%2Ftest&per_page=100'] = @()
+        $script:ReleaseApi['branches/main'] = @{ commit = @{ sha = 'b' * 40 } }
+        $script:ReleaseApi['branches/feature%2Ftest'] = @{ commit = @{ sha = 'a' * 40 } }
+        Write-TestJson $env:GITHUB_EVENT_PATH @{ inputs = @{ base_sha = ''; head_sha = 'c' * 40 } }
+        & $ResolveRelease
+        [IO.File]::ReadAllText($env:GITHUB_OUTPUT) | Should -Match "(?m)^head=$('c' * 40)\r?$"
+        [IO.File]::ReadAllText($env:GITHUB_OUTPUT) | Should -Match "(?m)^base=$('b' * 40)\r?$"
+        [IO.File]::WriteAllText($env:GITHUB_OUTPUT, '')
+        Write-TestJson $env:GITHUB_EVENT_PATH @{ inputs = @{ base_sha = 'd' * 40; head_sha = '' } }
+        & $ResolveRelease
+        [IO.File]::ReadAllText($env:GITHUB_OUTPUT) | Should -Match "(?m)^base=$('d' * 40)\r?$"
+        [IO.File]::ReadAllText($env:GITHUB_OUTPUT) | Should -Match "(?m)^head=$('a' * 40)\r?$"
+    }
+    It 'discovers fork PRs upstream and rejects ambiguous or self-parent defaults' {
+        $env:RELEASE_TAG = ''
+        Write-TestJson $env:GITHUB_EVENT_PATH @{ inputs = @{ base_sha = ''; head_sha = 'a' * 40 } }
+        $script:ReleaseApi[''] = @{ fork = $true; parent = @{ full_name = 'upstream/project' }; default_branch = 'main' }
+        $script:ReleaseApi['pulls?state=open&head=fixture%3Afeature%2Ftest&per_page=100'] = @()
+        Mock Invoke-RestMethod {
+            param($Uri)
+            $text = [string]$Uri
+            if ($text.StartsWith('https://api.github.invalid/repos/upstream/project/pulls?')) {
+                Write-Output -NoEnumerate @(@{ base = @{ ref = 'main'; repo = @{ full_name = 'upstream/project' } } })
+                return
+            }
+            if ($text -eq 'https://api.github.invalid/repos/upstream/project/branches/main') {
+                return @{ commit = @{ sha = 'b' * 40 } }
+            }
+            if ($text -ceq 'https://api.github.invalid/repos/fixture/benchmark') { return $script:ReleaseApi[''] }
+            $path = $text.Substring('https://api.github.invalid/repos/fixture/benchmark/'.Length)
+            Write-Output -NoEnumerate $script:ReleaseApi[$path]
+        }
+        & $ResolveRelease
+        [IO.File]::ReadAllText($env:GITHUB_OUTPUT) | Should -Match '(?m)^base_repository=upstream/project\r?$'
+        $script:ReleaseApi['pulls?state=open&head=fixture%3Afeature%2Ftest&per_page=100'] = @(@{}, @{})
+        { & $ResolveRelease } | Should -Throw '*Multiple open PR parents*'
+        $script:ReleaseApi['pulls?state=open&head=fixture%3Afeature%2Ftest&per_page=100'] = @()
+        $script:ReleaseApi[''] = @{ fork = $false; default_branch = 'feature/test' }
+        { & $ResolveRelease } | Should -Throw '*no distinct parent*'
+    }
     It 'emits missing-baseline exit 2 for a first release without running candidate helpers' {
         $script:ReleaseApi['releases?per_page=100&page=1'] = @($CurrentRelease)
         & $ResolveRelease
@@ -606,12 +1310,43 @@ Describe 'Release benchmark event identities' {
         $env:BASE_SHA = ''
         $env:HEAD_SHA = '2' * 40
         Mock pwsh { throw 'Candidate helper must not run.' }
-        & $MissingBaseline
-        $Result = ConvertFrom-BenchmarkJson ([IO.File]::ReadAllBytes((Join-Path $env:RUNNER_TEMP 'efficiency-report/report.json')))
+        New-Item -ItemType Directory -Path $env:RUNNER_TEMP -Force | Out-Null
+        Push-Location $env:RUNNER_TEMP
+        try { & $MissingBaseline } finally { Pop-Location }
+        $Result = ConvertFrom-BenchmarkJson ([IO.File]::ReadAllBytes((Join-Path $env:RUNNER_TEMP '.benchmark-recorded-public/report.json')))
         $Result.status | Should -Be 'missing-baseline'
         $Result.exitCode | Should -Be 2
         $Result.reasons | Should -Contain 'previous-stable-release-unavailable'
         Should -Invoke pwsh -Times 0
+    }
+    It 'limits legacy bootstrap to missing release tooling through 0.18.1 and never waives fresh collection' -ForEach @(
+        @{ Version = '0.18.1'; Status = 'missing-baseline'; Reason = 'base-comparison-tooling-unavailable'; InputVerdict = '2'; ReleaseCandidate = $true; CollectionRequired = $true; Expected = '2' }
+        @{ Version = '0.18.0'; Status = 'missing-baseline'; Reason = 'base-comparison-tooling-unavailable'; InputVerdict = '2'; ReleaseCandidate = $true; Expected = '0' }
+        @{ Version = '0.18.1'; Status = 'missing-baseline'; Reason = 'previous-stable-release-unavailable'; InputVerdict = '2'; ReleaseCandidate = $true; Expected = '0' }
+        @{ Version = '0.18.2'; Status = 'missing-baseline'; Reason = 'base-comparison-tooling-unavailable'; InputVerdict = '2'; ReleaseCandidate = $true; Expected = '2' }
+        @{ Version = '0.19.0'; Status = 'missing-baseline'; Reason = 'base-comparison-tooling-unavailable'; InputVerdict = '2'; ReleaseCandidate = $true; Expected = '2' }
+        @{ Version = '0.18.1'; Status = 'stale-record'; Reason = 'unbound-execution-protocol'; InputVerdict = '2'; ReleaseCandidate = $true; Expected = '2' }
+        @{ Version = '0.18.1'; Status = 'incompatible'; Reason = 'protocol'; InputVerdict = '2'; ReleaseCandidate = $true; Expected = '2' }
+        @{ Version = '0.18.1'; Status = 'missing-candidate'; Reason = 'selection'; InputVerdict = '2'; ReleaseCandidate = $true; Expected = '2' }
+        @{ Version = '0.18.1'; Status = 'regression'; Reason = 'quality'; InputVerdict = '3'; ReleaseCandidate = $true; Expected = '3' }
+        @{ Version = '0.18.1'; Status = 'operational-error'; Reason = 'failure'; InputVerdict = '1'; ReleaseCandidate = $true; Expected = '1' }
+        @{ Version = '0.18.1'; Status = 'missing-baseline'; Reason = 'base-comparison-tooling-unavailable'; InputVerdict = '2'; ReleaseCandidate = $false; Expected = '2' }
+    ) {
+        param([bool]$CollectionRequired = $false)
+        $env:RUNNER_TEMP = Join-Path $TestDrive ([guid]::NewGuid().ToString())
+        $directory = Join-Path $env:RUNNER_TEMP 'efficiency-report'
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+        $path = Join-Path $directory 'report.json'
+        Write-TestJson $path @{ status = $Status; reasons = @($Reason); exitCode = [int]$InputVerdict }
+        $original = [IO.File]::ReadAllText($path)
+        $env:VERDICT = $InputVerdict
+        $env:COLLECTION_REQUIRED = if ($CollectionRequired) { 'true' } else { '' }
+        $env:CANDIDATE_SHA = if ($ReleaseCandidate) { 'a' * 40 } else { '' }
+        $env:GITHUB_STEP_SUMMARY = Join-Path $env:RUNNER_TEMP 'summary'
+        Mock git { $global:LASTEXITCODE = 0; "version: $Version" }
+        & $Bootstrap
+        [IO.File]::ReadAllText($env:GITHUB_OUTPUT) | Should -Match "(?m)^verdict=$Expected\r?$"
+        [IO.File]::ReadAllText($path) | Should -BeExactly $original
     }
     It 'paginates published releases instead of silently missing an older baseline' {
         $script:ReleaseApi['releases?per_page=100&page=1'] = @(1..100 | ForEach-Object {
