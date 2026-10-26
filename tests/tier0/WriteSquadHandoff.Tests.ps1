@@ -2025,6 +2025,21 @@ Describe 'Write-SquadHandoff.ps1 compact all-mode Scribe read set (H1, WRT-08)' 
         $scribe | Should -Not -Match 'economy only'
     }
 
+    It 'the Coordinator prefers dispatch facts without forcing derived JSON inputs (WRT-13)' {
+        $coordinator = @($script:HandoffModel.SquadAgents | Where-Object Name -eq 'squad-coordinator.agent.md')[0].Body
+        $step = [regex]::Match($coordinator, '(?s)### Step 5:.*?(?=### Step 6:)').Value
+        $step | Should -Match 'single-dispatch fact parameters'
+        foreach ($parameter in @('RunId', 'Agent', 'Request', 'Deliverable', 'Outcome', 'ConsumptionPath', 'OrchestrationConsumptionPath')) {
+            $step | Should -Match ([regex]::Escape("-$parameter"))
+        }
+        $step | Should -Match 'derives.*activeRoles'
+        $step | Should -Match 'Full JSON.*decisions.*multiple/no dispatches.*routing.*state changes'
+        $step | Should -Match 'estimated fallback'
+        $step | Should -Match 'sessionModel.*changes.*modelOverrides'
+        $step | Should -Match 'ledger-only.*PASS'
+        $step | Should -Not -Match 'minimal structured JSON|Always include a consumption payload|Re-report.*every turn'
+    }
+
     It 'the legacy procedure and economy mode link to the shared deterministic contract' {
         $procedure = (Get-Content -LiteralPath (Join-Path $PackageRoot '.agents/skills/squad/references/scribe-procedure.md') -Raw) -replace "`r`n", "`n"
         $procedure | Should -Match '\[economy-scribe\.md\]\(economy-scribe\.md\)'
