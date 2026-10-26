@@ -1,10 +1,10 @@
 {
   "schema": "benchmark-score-v1",
   "scenario": "task-cli-cold-start",
-  "measuredAt": "2026-10-26T09:28:30Z",
+  "measuredAt": "2026-10-26T13:09:54Z",
   "source": {
-    "commit": "b3c51ab524899bd07aea11fd7d3653c7b635fb95",
-    "squadSourceHash": "ee545046b1459cee7901e4036f522b0cf32e730abaa9233944626370e8d09b15",
+    "commit": "7c6a861348c38f2a4600220965c4a34f7f9178a8",
+    "squadSourceHash": "19670b6ad9395846fef577c0c367be5d4fc951ebe0fa7e3c5029b0e835dfce0c",
     "uncommittedChanges": false
   },
   "environment": {
@@ -18,39 +18,39 @@
     "failed": 0
   },
   "summary": {
-    "quality": 78.0,
+    "quality": 76.0,
     "dimensions": {
       "businessClarity": 15.0,
       "scopeFidelity": 16.0,
-      "acceptanceCriteria": 16.0,
+      "acceptanceCriteria": 15.0,
       "traceability": 16.0,
-      "risksAndDecisions": 15.0
+      "risksAndDecisions": 14.0
     },
     "functional": 1,
     "workflow": 0,
     "criticalHighFindings": 1,
-    "averageSeconds": 1500.616,
-    "averageCredits": 508.091203
+    "averageSeconds": 1288.219,
+    "averageCredits": 457.456383
   },
   "trials": [
     {
       "run": 1,
       "scored": true,
-      "quality": 78.0,
+      "quality": 76.0,
       "dimensions": {
         "businessClarity": 15.0,
         "scopeFidelity": 16.0,
-        "acceptanceCriteria": 16.0,
+        "acceptanceCriteria": 15.0,
         "traceability": 16.0,
-        "risksAndDecisions": 15.0
+        "risksAndDecisions": 14.0
       },
       "functional": true,
       "workflow": false,
       "criticalHighFindings": 1,
-      "seconds": 1500.616,
-      "credits": 508.091203,
+      "seconds": 1288.219,
+      "credits": 457.456383,
       "failedChecks": [
-        "requirements/reviewOutcome"
+        "build/reviewOutcome"
       ],
       "note": ""
     }
