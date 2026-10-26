@@ -56,7 +56,7 @@ When it finishes, the command prints the badge text and saves:
 | --- | --- |
 | `score.json` | The score and every run, in a fixed format that the pull request comparison reads |
 | `badge.svg` | The badge shown at the top of this page and in the root README |
-| `report.md` | The score, the five quality dimensions, each run and the checks that did not pass |
+| `report.md` | The score, observed agent activity, the five quality dimensions, each run and the checks that did not pass |
 
 A run that does not finish, or has no valid judged result, is recorded as failed: it is
 left out of the quality median and averages, and the functional and workflow counts are
@@ -126,6 +126,37 @@ verifier confirming the recorded state matches reality. A run passes only if eve
 passes.
 
 ## Reading a score
+
+### Observed activity
+
+Generated reports compare **Earlier run** (the previous local `score.json`, read
+before replacement) with **Latest run** (the new score). PR comments use the base
+branch and PR scores respectively. Neither comparison launches a benchmark.
+The six rows show Scribe dispatches, model requests, summed dispatch time and
+credits, Coordinator model requests, and combined BRD/PRD author model requests.
+They use native runtime identities rather than model names or the Scribe's
+estimated ledger.
+
+Activity is stored in each trial's `activity` and in `summary.activity` in
+`score.json`, without changing `benchmark-score-v1`. Summary values are arithmetic
+means over scored runs, so counts can be fractional. A metric is **unavailable**
+if any scored run lacks it, if runtime attribution is incomplete, or if an older
+score does not contain it. Missing data is never replaced with zero; an observed
+absence of dispatches or author usage can be zero. Failed, unscored trials retain
+their available activity but do not enter these averages.
+
+Model requests count unique `(sourceSessionId, usageId)` usage records in the
+final cumulative workflow log; stage snapshots are not added together. Requests
+without usage records cannot be counted. Credits sum complete native credit
+records for Scribe requests, excluding separate compaction charges and the judge;
+incomplete Scribe credit coverage makes that cell unavailable. Dispatch time sums
+completed Scribe dispatch durations and is unavailable if a completion is missing.
+Overlapping dispatches can therefore exceed wall-clock time.
+
+These are diagnostic observations, not new scoring rules or evidence of a causal
+speed improvement. Older saved scores remain readable and are not backfilled.
+
+### Score interpretation
 
 * The badge shows the quality median, the functional and workflow pass counts and the
   **average benchmark time per run**. It is green only when every run was scored and

@@ -119,7 +119,13 @@ if ($Scored -eq 0) {
     exit 1
 }
 $Score = ConvertTo-BenchmarkScore -Trial $Summaries.ToArray() -Requested $Runs -Commit $Commit -UncommittedChanges $Uncommitted -Identity $Identity -Scenario ([string]$Scenario.name)
-[void](Write-BenchmarkScore -Score $Score -Directory $OutputDirectory)
+$EarlierScore = $null
+$EarlierPath = Join-Path $OutputDirectory 'score.json'
+if (Test-Path -LiteralPath $EarlierPath -PathType Leaf) {
+    try { $EarlierScore = Read-BenchmarkScore -Path $EarlierPath }
+    catch { Write-Warning "Earlier score could not be read; its activity is unavailable: $($_.Exception.Message)" }
+}
+[void](Write-BenchmarkScore -Score $Score -Directory $OutputDirectory -EarlierScore $EarlierScore)
 Write-Host ''
 Write-Host (Get-BenchmarkBadgeText $Score)
 if ($Scored -lt $Runs) { Write-Warning "$($Runs - $Scored) of $Runs runs did not produce a score; they are recorded as failed." }
