@@ -325,7 +325,7 @@ Describe 'Efficiency recovery end to end' -Tag 'Unit' {
         $Fake = @'
 if ($args -contains 'mcp') { '{"mcpServers":{}}'; exit 0 }
 if ($args -contains '--version') { 'offline-recovery-cli'; exit 0 }
-if ($args -contains '--help') { '--acp --session-id --max-ai-credits --no-ask-user --max-autopilot-continues --usage-output-file --no-remote --no-remote-export --add-dir'; exit 0 }
+if ($args -contains '--help') { '--acp --session-id --max-ai-credits --no-ask-user --max-autopilot-continues --usage-output-file --no-remote-export --add-dir'; exit 0 }
 if ($args -contains '--acp') {
     $env:HVE_FAKE_ACP_MODE='success'
     $env:HVE_FAKE_ACP_TRACE=Join-Path $PWD 'acp-trace.jsonl'
@@ -714,7 +714,7 @@ exit 37
         foreach ($BroadPermission in @('--allow-all', '--yolo', '--allow-all-tools', '--allow-all-paths', '--allow-all-urls')) {
             $Arguments | Should -Not -Contain $BroadPermission
         }
-        foreach ($PreservedOption in @('--no-custom-instructions', '--disable-builtin-mcps', '--no-remote', '--no-remote-export')) {
+        foreach ($PreservedOption in @('--no-custom-instructions', '--disable-builtin-mcps', '--no-remote-export')) {
             $Arguments | Should -Contain $PreservedOption
         }
     }
@@ -884,7 +884,7 @@ exit 0
         @'
 if ($args -contains 'mcp') { '{"mcpServers":{}}'; exit 0 }
 if ($args -contains '--version') { 'offline-incomplete-cli'; exit 0 }
-if ($args -contains '--help') { '--session-id --max-ai-credits --no-ask-user --max-autopilot-continues --usage-output-file --no-remote --no-remote-export --add-dir'; exit 0 }
+if ($args -contains '--help') { '--session-id --max-ai-credits --no-ask-user --max-autopilot-continues --usage-output-file --no-remote-export --add-dir'; exit 0 }
 Add-Content 'stage-launches.txt' 'one invocation'
 $Session = $args[[array]::IndexOf($args, '--session-id') + 1]
 $SessionRoot = Join-Path $HOME ".copilot/session-state/$Session"
@@ -917,7 +917,7 @@ exit 0
         @'
 if ($args -contains 'mcp') { '{"mcpServers":{}}'; exit 0 }
 if ($args -contains '--version') { 'offline-argv-cli'; exit 0 }
-if ($args -contains '--help') { '--session-id --max-ai-credits --no-ask-user --max-autopilot-continues --usage-output-file --no-remote --no-remote-export --add-dir'; exit 0 }
+if ($args -contains '--help') { '--session-id --max-ai-credits --no-ask-user --max-autopilot-continues --usage-output-file --no-remote-export --add-dir'; exit 0 }
 @{ arguments = @($args); repoHooks = $env:GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS; stateParentsReady = (Test-Path -LiteralPath '.copilot-tracking/squad/history' -PathType Container); stateFiles = if(Test-Path -LiteralPath '.copilot-tracking/squad'){@(Get-ChildItem -LiteralPath '.copilot-tracking/squad' -Recurse -File).Count}else{-1} } | ConvertTo-Json -Depth 6 -Compress
 exit 37
 '@ | Set-Content -LiteralPath $Cli -Encoding utf8NoBOM
