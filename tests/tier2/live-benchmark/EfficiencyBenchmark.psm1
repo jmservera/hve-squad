@@ -604,6 +604,44 @@ function Save-EfficiencyAttemptEvidence {
     [pscustomobject]@{ metrics = $Metrics; lineCount = (Get-Content -LiteralPath $Snapshot | Measure-Object -Line).Lines }
 }
 
+function Write-EfficiencyProgress {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateRange(1, 7)][int]$Step,
+        [Parameter(Mandatory)][string]$Label,
+        [ValidateSet('started', 'finished', 'skipped', 'failed')][string]$Status = 'started',
+        [string]$Path = ''
+    )
+    $Remaining = 7 - $Step
+    $Unit = if ($Remaining -eq 1) { 'step' } else { 'steps' }
+    $Line = '[{0}] Step {1}/7: {2} - {3}; {4} {5} remaining after this step.' -f [datetimeoffset]::Now.ToString('yyyy-MM-dd HH:mm:sszzz'), $Step, $Label, $Status, $Remaining, $Unit
+    if ($Path) { Add-Content -LiteralPath $Path -Value $Line -Encoding utf8NoBOM }
+    else { Write-Host $Line }
+}
+
+function Update-EfficiencyProgress {
+    [CmdletBinding()]
+    param([hashtable]$Context, [string]$Path, [double]$ElapsedSeconds, [int]$IntervalSeconds, [switch]$Final)
+    if (-not $Context.reader -and (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        $Context.reader = [IO.StreamReader]::new([IO.File]::Open($Path, 'Open', 'Read', 'ReadWrite'))
+    }
+    if ($Context.reader) {
+        $Context.pending += $Context.reader.ReadToEnd()
+        while (($Boundary = $Context.pending.IndexOf("`n")) -ge 0) {
+            $Line = $Context.pending.Substring(0, $Boundary).TrimEnd("`r")
+            $Context.pending = $Context.pending.Substring($Boundary + 1)
+            if (-not $Line) { continue }
+            Write-Host $Line
+            $Context.last = $Line
+            $Context.reportedAt = $ElapsedSeconds
+        }
+    }
+    if (-not $Final -and $ElapsedSeconds - $Context.reportedAt -ge $IntervalSeconds) {
+        Write-Host "[$([datetimeoffset]::Now.ToString('yyyy-MM-dd HH:mm:sszzz'))] Still running ($([int]$ElapsedSeconds) s elapsed). Last update: $($Context.last)"
+        $Context.reportedAt = $ElapsedSeconds
+    }
+}
+
 function Invoke-EfficiencyProcess {
     <# .SYNOPSIS
     Runs a subprocess with redirected streams and a watchdog; optionally watches CLI usage limits.
@@ -620,7 +658,9 @@ function Invoke-EfficiencyProcess {
         [int]$StartLine = 0,
         [double]$MaxCredits = 0,
         [AllowEmptyString()][string]$InputText,
-        [hashtable]$EnvironmentVariables = @{}
+        [hashtable]$EnvironmentVariables = @{},
+        [string]$ProgressPath = '',
+        [ValidateRange(1, 3600)][int]$ProgressIntervalSeconds = 30
     )
     if ($MaxCredits -gt 0 -and -not $EventsPath) { throw 'A credit-guarded process requires an events path.' }
     $Info = [Diagnostics.ProcessStartInfo]::new()
@@ -636,6 +676,7 @@ function Invoke-EfficiencyProcess {
     $Watch = [Diagnostics.Stopwatch]::StartNew()
     $StopCause = 'none'; $Started = $false
     $Monitor = @{ reader = $null; lines = 0; pending = ''; reason = 'none'; requestIds = [Collections.Generic.HashSet[string]]::new(); questions = 0; credits = (New-EfficiencyCreditMonitor -MaxCredits $MaxCredits) }
+    $Progress = @{ reader = $null; pending = ''; last = 'Waiting for run setup (step 1/7).'; reportedAt = 0.0 }
     $OutputStream = [IO.File]::Create($OutputPath)
     $ErrorStream = [IO.File]::Create($OutputPath + '.stderr')
     try {
@@ -654,12 +695,14 @@ function Invoke-EfficiencyProcess {
             else { $null = $InputCopy.GetAwaiter().GetResult(); $Process.StandardInput.Close() }
         }
         while (-not $Process.WaitForExit(250)) {
+            if ($ProgressPath) { Update-EfficiencyProgress -Context $Progress -Path $ProgressPath -ElapsedSeconds $Watch.Elapsed.TotalSeconds -IntervalSeconds $ProgressIntervalSeconds }
             if ($Watch.Elapsed.TotalSeconds -gt $TimeoutSeconds) { $StopCause = 'timeout' }
             Update-EfficiencyProcessMonitor -Context $Monitor -EventsPath $EventsPath -StartLine $StartLine -MaxRequests $MaxRequests
             if ($Monitor.reason -ne 'none') { $StopCause = $Monitor.reason }
             if ($StopCause -ne 'none') { $Process.Kill($true); $Process.WaitForExit(); break }
         }
         $null = $OutputCopy.GetAwaiter().GetResult(); $null = $ErrorCopy.GetAwaiter().GetResult()
+        if ($ProgressPath) { Update-EfficiencyProgress -Context $Progress -Path $ProgressPath -ElapsedSeconds $Watch.Elapsed.TotalSeconds -IntervalSeconds $ProgressIntervalSeconds -Final }
         Update-EfficiencyProcessMonitor -Context $Monitor -EventsPath $EventsPath -StartLine $StartLine -MaxRequests $MaxRequests
         if ($Monitor.reason -ne 'none') { $StopCause = $Monitor.reason }
         if ($MaxCredits -gt 0 -and ($Monitor.credits.usageIds.Count -le $PriorCreditRecords -or $Monitor.pending.Trim())) { $StopCause = 'incomplete-credit-metering' }
@@ -667,6 +710,7 @@ function Invoke-EfficiencyProcess {
     }
     finally {
         if ($Monitor.reader) { $Monitor.reader.Dispose() }
+        if ($Progress.reader) { $Progress.reader.Dispose() }
         if ($Started -and -not $Process.HasExited) { $Process.Kill($true) }
         $OutputStream.Dispose(); $ErrorStream.Dispose(); $Process.Dispose()
     }
@@ -1225,4 +1269,4 @@ function Invoke-EfficiencySeries {
     [pscustomobject]@{ report = $Report; controls = $Controls; runs = @($Runs); exitCode = if ($Outcome -in @('passed', 'baseline-established', 'baseline-recorded')) { 0 } else { 2 } }
 }
 
-Export-ModuleMember -Function Copy-EfficiencySnapshot, Measure-EfficiencyEvents, Get-EfficiencyRecoveryPolicy, Get-EfficiencyRecoveryDecision, Invoke-EfficiencyCompaction, Save-EfficiencyAttemptEvidence, Invoke-EfficiencyProcess, Get-EfficiencyTreeHash, Test-EfficiencyWorkflow, Test-EfficiencyJudge, Invoke-EfficiencyJudge, Compare-EfficiencyRuns, Save-EfficiencyBaseline, Get-EfficiencyCompatibility, Test-EfficiencyRun, Test-EfficiencyObservation, Invoke-EfficiencySeries
+Export-ModuleMember -Function Copy-EfficiencySnapshot, Measure-EfficiencyEvents, Get-EfficiencyRecoveryPolicy, Get-EfficiencyRecoveryDecision, Invoke-EfficiencyCompaction, Save-EfficiencyAttemptEvidence, Write-EfficiencyProgress, Invoke-EfficiencyProcess, Get-EfficiencyTreeHash, Test-EfficiencyWorkflow, Test-EfficiencyJudge, Invoke-EfficiencyJudge, Compare-EfficiencyRuns, Save-EfficiencyBaseline, Get-EfficiencyCompatibility, Test-EfficiencyRun, Test-EfficiencyObservation, Invoke-EfficiencySeries

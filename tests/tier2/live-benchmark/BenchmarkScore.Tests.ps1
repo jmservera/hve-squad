@@ -441,10 +441,13 @@ Describe 'Invoke-Benchmark.ps1' {
             Set-Content (Join-Path $script:Repo 'squad-src/.github/agents/squad-test.md') '# test'
             New-RunResult | ConvertTo-Json -Depth 10 | Set-Content (Join-Path $live 'fake-run.json')
             Set-Content (Join-Path $live 'Invoke-EfficiencyExercise.ps1') @'
-param($Mode, $TrialRoot, $SourceRoot, $InstallRoot, $Arm, $Pair, $MaxCredits, [switch]$Live, [switch]$IsolatedEnvironment, [switch]$ObservationOnly)
+param($Mode, $TrialRoot, $SourceRoot, $InstallRoot, $Arm, $Pair, $MaxCredits, $ProgressPath, [switch]$Live, [switch]$IsolatedEnvironment, [switch]$ObservationOnly)
+Import-Module (Join-Path $PSScriptRoot 'EfficiencyBenchmark.psm1') -Force
+Write-EfficiencyProgress -Step 1 -Label 'Preparing workspace' -Path $ProgressPath
 if ($env:FAKE_ENGINE_FAIL_PAIR -eq $Pair) { [Console]::Error.WriteLine('stand-in engine failure'); exit 1 }
 New-Item -ItemType Directory -Path (Join-Path $TrialRoot 'out') -Force | Out-Null
 Copy-Item (Join-Path $PSScriptRoot 'fake-run.json') (Join-Path $TrialRoot 'out/run.json')
+Write-EfficiencyProgress -Step 7 -Label 'Saving run evidence' -Status finished -Path $ProgressPath
 '@
             foreach ($tool in 'apm', 'copilot') {
                 $path = Join-Path $TestDrive "bin/$tool"
@@ -477,6 +480,11 @@ Copy-Item (Join-Path $PSScriptRoot 'fake-run.json') (Join-Path $TrialRoot 'out/r
             $score.runs.failed | Should -Be 1
             $output | Should -Match 'Run 2 did not produce a score'
             $output | Should -Match 'stand-in engine failure'
+            $output | Should -Match '\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d[+-]\d\d:\d\d\] Installation finished; 2 runs'
+            $output | Should -Match 'Run 1 of 2 started; 7 planned steps, 1 later runs'
+            $output | Should -Match 'Step 1/7: Preparing workspace - started; 6 steps remaining'
+            $output | Should -Match 'Step 7/7: Saving run evidence - finished; 0 steps remaining'
+            $output | Should -Match 'Saved score.json.*0 steps remaining'
         }
 
         It 'leaves the saved score alone when no run produced one' {

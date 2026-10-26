@@ -39,6 +39,22 @@ hung run is stopped after 3 hours. One run is a quick check: the judge is an AI 
 so a single run varies more than the median of three. Add `-WhatIf` to see what would
 run without spending anything.
 
+### Progress output
+
+The console timestamps installation, run results and report generation, including
+the local UTC offset. Each run reports seven planned steps: workspace preparation,
+squad initialization, requirements, build, acceptance/workflow checks, document
+judging, and saving evidence. Every transition shows its step number and how many
+steps remain **after the current step**; run headers also show later runs remaining.
+
+While the run subprocess is active, a quiet period of 30 seconds produces a
+heartbeat with elapsed run time and the last timestamped step update. Progress is
+forwarded through a dedicated `run-N-progress.log` in the retained evidence folder;
+model output and raw diagnostics remain in their existing logs, not streamed to
+the console. Context recovery stays inside its current step, skipped work is
+marked explicitly, and a finished step means execution finished, not that its
+quality or workflow checks passed. Remaining steps are a plan, not an ETA.
+
 Before you run it:
 
 * PowerShell 7.4 or later, Git, the APM CLI (`apm`, version 0.29.0 as in
