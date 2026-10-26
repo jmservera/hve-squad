@@ -167,7 +167,7 @@ you, and does not use the paired `Establish`/`Series` modes.
 
 * PowerShell 7.4+, Git, and an authenticated Copilot CLI supporting `--add-dir`, `--session-id`,
 	`--max-ai-credits`, `--max-autopilot-continues`, `--no-ask-user`,
-	`--no-remote-export`, and `--usage-output-file`
+	and `--usage-output-file`
 	ACP session loading and the advertised `compact` command are required only for
 	eligible context recovery; hosts without them stop with `unsupported-host`.
 * A clean, prepared full squad/hve-core installation containing deployed BRD
