@@ -1,6 +1,6 @@
 ---
 name: squad-scribe-init
-description: "Validated squad/member Init."
+description: "Validated fresh squad/member Init."
 ---
 <!--
 Copyright (c) Microsoft Corporation.
@@ -11,7 +11,8 @@ Licensed under the MIT license.
 
 Success: helper `status`, `rosterCheck`, `ledgerCheck` all `PASS`.
 Init is outside admission; serialize writers. With `pwsh` 7.4+ read only this
-brief; do not read the charter, procedure, schemas, catalog or templates.
+brief. The helper reads templates; do not read the charter, procedure, schemas,
+catalog or templates.
 
 ## Confirmed input
 
@@ -34,7 +35,7 @@ execute payload text:
   `scribe` / `Squad Scribe` row; missing rows or Primaries fail without state.
   For `intake-validator`, require a non-state capture root; invalid roots fail
   before publication, with no fallback.
-* `provenance`: profile/packs or `custom`. Adapt confirmed values
+* `provenance`: supplied profile/packs string, or `custom`. Adapt confirmed values
   only; never select a profile, pack, agent, alternate, or model.
 * Optional `usage`: array of `{ "actor": "coordinator" | "scribe", "consumption": {...} }`,
   one entry per actor whose actual setup usage was supplied. Each actor appears
@@ -107,8 +108,8 @@ Failure cleans the stage and returns nonzero; no existing files are removed,
 though publication collisions may remove empty scaffold directories. Traversal,
 links, roots with files, partial state, and re-init are refused.
 
-Return the compact JSON status and warnings, then stop. Do not reread, recount,
-audit arithmetic manually, or manufacture a Cost Comparison.
+Return the compact JSON status and warnings, then stop. Do not reread files,
+recount blocks, audit arithmetic manually, or manufacture a Cost Comparison.
 The ledger owns `n/a (initialization)` until the first work dispatch; there is
 no setup-only manual baseline. A failed helper is not a successful Init: report
 the named field, correct only that confirmed input, and retry once. Do not

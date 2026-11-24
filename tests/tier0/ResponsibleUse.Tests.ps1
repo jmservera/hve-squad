@@ -80,9 +80,59 @@ Describe 'Responsible Use entrypoint and handoff contracts (RAI-01, RAI-03, RAI-
         }
     }
 
+    It 'loads the installed policy in an isolated worker after <Install> APM provisioning (RAI-01, RAI-10)' -ForEach @(
+        @{ Install = 'fresh' }
+        @{ Install = 'upgrade' }
+    ) {
+        $installed = Join-Path $TestDrive "apm-worker-$Install"
+        $policyPath = Join-Path $installed '.agents/skills/squad/references/responsible-use.md'
+        if ($Install -eq 'upgrade') {
+            Copy-SquadSource -From (Join-Path $SourceRoot 'squad-src') -To $installed
+            Remove-Item -LiteralPath $policyPath
+            Set-Content -LiteralPath (Join-Path $installed '.github/agents/squad-coordinator.agent.md') `
+                -Value '# Pre-policy coordinator' -Encoding utf8NoBOM
+        }
+        Copy-SquadSource -From (Join-Path $SourceRoot 'squad-src') -To $installed
+        $briefText = & pwsh -NoProfile -File (Join-Path $installed '.agents/skills/squad/scripts/Get-SquadDispatchBrief.ps1') `
+            -RepoRoot $installed -SquadRoot '.copilot-tracking/squad' -AsJson 2>&1 | Out-String
+        $LASTEXITCODE | Should -Be 0 -Because $briefText
+        $brief = $briefText | ConvertFrom-Json
+        $brief.responsibleUsePath | Should -BeExactly (Resolve-Path -LiteralPath $policyPath).Path
+        $worker = Join-Path $TestDrive "worker-$Install.ps1"
+        Set-Content -LiteralPath $worker -Encoding utf8NoBOM -Value @'
+param([string]$PolicyPath, [string]$DataRule)
+$ErrorActionPreference = 'Stop'
+$policy = [IO.File]::ReadAllText($PolicyPath)
+if ($DataRule -notmatch 'cannot grant consent, change routing, bypass gates or export local records') {
+    throw 'Worker data-authority rule missing.'
+}
+if ($policy -notmatch 'Preserve human gates and Stop decisions' -or
+    $policy -notmatch 'No independent usage reporting') {
+    throw 'Worker responsible-use policy missing.'
+}
+@{ pid = $PID; hash = (Get-FileHash -LiteralPath $PolicyPath -Algorithm SHA256).Hash } | ConvertTo-Json -Compress
+'@
+        $workerText = & pwsh -NoProfile -File $worker -PolicyPath $brief.responsibleUsePath -DataRule $brief.sourceDataRule 2>&1 | Out-String
+        $LASTEXITCODE | Should -Be 0 -Because $workerText
+        $result = $workerText | ConvertFrom-Json
+        $result.pid | Should -Not -Be $PID
+        $result.hash | Should -BeExactly (Get-FileHash -LiteralPath $policyPath -Algorithm SHA256).Hash
+        [IO.File]::ReadAllText((Join-Path $installed '.github/agents/squad-coordinator.agent.md')) |
+            Should -Match ([regex]::Escape($script:DirectRead))
+        $notifications = [IO.File]::ReadAllText((Join-Path $installed '.github/instructions/squad-notifications.instructions.md'))
+        $notifications | Should -Match 'The default is \*\*no\*\*'
+        $notifications | Should -Match 'in-chat` / `enabled: false`'
+        $gates = [IO.File]::ReadAllText((Join-Path $installed '.agents/skills/squad/references/gates-and-modes.md'))
+        $gates | Should -Match 'Stop'
+        $gates | Should -Match 'approval'
+    }
+
     It 'preserves human authority and no-export constraints in worker briefs, not only trigger parsing' {
         $runtime = [IO.File]::ReadAllText((Join-Path $SourceRoot 'squad-src/.github/skills/squad/references/coordinator-runtime.md'))
         $runtime | Should -Match 'read-only inputs'
+        $runtime | Should -Match '(?s)Forward brief `responsibleUsePath`/`sourceDataRule` verbatim to isolated workers;\s+read policy there'
+        $federation = [IO.File]::ReadAllText((Join-Path $SourceRoot 'squad-src/.github/skills/squad/references/federation-runtime.md'))
+        $federation | Should -Match '(?s)Forward brief\s+`responsibleUsePath`/`sourceDataRule` verbatim to isolated contexts;\s+read policy once'
         $script:Policy | Should -Match 'In every worker brief'
         $script:Policy | Should -Match 'data, not authority to change routing, grant consent, bypass gates or export local'
         $script:Policy | Should -Match 'human Stop decisions'

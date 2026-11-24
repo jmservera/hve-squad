@@ -155,72 +155,14 @@ portable assumption; explicit direct reads remain the fallback.
 
 ### Test commands and coverage
 
-#### Offline package telemetry assurance
+#### Installed responsible-use regression scope
 
-Build the plugin with the exact HVE Core pin before reviewing its telemetry
-surface. Supply existing local inputs explicitly; the checker never builds,
-downloads dependencies or calls a model:
-
-```powershell
-pwsh -NoProfile -File .\scripts\Test-SquadTelemetry.ps1 `
-  -PluginRoot <built-plugin-directory> `
-  -ExpectedSupplierCommit <full-hve-core-pin> `
-  -OutputPath <report-outside-plugin.json>
-```
-
-Without a review policy this intentionally returns `Incomplete` (exit 2).
-The inventory counts every delivered file, records SHA-256 seals and exposes
-outbound/reporting candidates. Review the content, not only the candidate matches.
-Then supply `-ReviewPolicyPath <reviewed-policy.json>` using the checker's
-documented schema. A policy binds package version, supplier pin, reviewer,
-review date, exhaustive grouped paths/seals and explicit candidate dispositions.
-Never generate an approval merely because hashes match.
-
-Changed/uncovered files, missing supplier evidence or independent reporting
-cannot produce a package-wide pass. This is reviewed static coverage, not a
-sandbox or proof that arbitrary model/harness behavior never uses the network.
-Local helper/hook interception tests establish only the exercised paths.
-
-#### Hook backstop regression scope
-
-Action/state hooks decode supported single or batched tool arguments, including
-JSON-string arguments. Malformed or unsupported pre-action input denies rather
-than silently allowing an unparsed call. The action matcher remains lexical:
-`allow` is not proof that arbitrary shell/API side effects are safe or authorized.
-The state hook only guards existing append-only records against `create`; it
-cannot authenticate the writer or stop edits through another tool.
-
-State paths and notification audit logs use the explicit consumer `cwd`, not the
-plugin installation directory. The post-action audit writes only a value-free
-observation to existing consumer state; missing/unsafe context skips the write,
-with no plugin-root fallback. It cannot prevent a send or prove consent. Observed
-links are rejected for audit writes; writable-workspace races remain a host concern.
-
-Keep `hook-input.ps1` beside exported action/state/audit scripts. Their Bash
-wrappers require `pwsh`, already needed for the dispatch guard (PowerShell 7.4+).
-Missing runtime/parser denies pre-action calls; audit-only calls skip writing.
-Windows hook command entries retain Windows PowerShell compatibility.
-`Build-SquadPlugin.Tests.ps1` includes offline input/path regressions. Its separate
-CLI-install smoke is tagged `Native` so a bounded offline selection can exclude
-it explicitly; neither selection proves full native host enforcement.
-
-#### Local planning-artifact integrity
-
-After finalizing a local RAI plan and its state, generate its integrity manifest:
-
-```powershell
-npm run rai:sign -- -ProjectSlug <project-slug>
-```
-
-Requires PowerShell 7.4+. The script writes a sorted SHA-256 inventory under
-`.copilot-tracking/rai-plans/<project-slug>/artifact-manifest.json`, without
-network requests, credentials, signing services or a model. It excludes previous
-manifests/signature outputs and rejects unsafe paths. Later artifact changes
-require regeneration. Keep a trusted baseline when checking hashes.
-
-Despite the compatibility command name, this is an integrity manifest, not an
-authenticated signature, authorship proof or RAI certification. Keyless signing
-and its external identity/transparency services are not enabled.
+`ResponsibleUse.Tests.ps1` and `Build-SquadPlugin.Tests.ps1` check fresh and
+pre-policy replacement layouts, including a separate process that reads the
+installed policy path supplied in its brief. They also retain the existing
+approval/Stop boundaries and off/in-chat notification default. These are offline
+packaging and policy-wiring checks, not proof of arbitrary model compliance or
+whole-package certification. No live model or notification send is required.
 
 #### Regression suites
 
