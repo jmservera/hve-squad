@@ -208,6 +208,29 @@ Despite the compatibility command name, this is an integrity manifest, not an
 authenticated signature, authorship proof or RAI certification. Keyless signing
 and its external identity/transparency services are not enabled.
 
+#### Hook backstop regression scope
+
+Action/state hooks decode supported single or batched tool arguments, including
+JSON-string arguments. Malformed or unsupported pre-action input denies rather
+than silently allowing an unparsed call. The action matcher remains lexical:
+`allow` is not proof that arbitrary shell/API side effects are safe or authorized.
+The state hook only guards existing append-only records against `create`; it
+cannot authenticate the writer or stop edits through another tool.
+
+State paths and notification audit logs use the explicit consumer `cwd`, not the
+plugin installation directory. The post-action audit writes only a value-free
+observation to existing consumer state; missing/unsafe context skips the write,
+with no plugin-root fallback. It cannot prevent a send or prove consent. Observed
+links are rejected for audit writes; writable-workspace races remain a host concern.
+
+Keep `hook-input.ps1` beside exported action/state/audit scripts. Their Bash
+wrappers require `pwsh`, already needed for the dispatch guard (PowerShell 7.4+).
+Missing runtime/parser denies pre-action calls; audit-only calls skip writing.
+Windows hook command entries retain Windows PowerShell compatibility.
+`Build-SquadPlugin.Tests.ps1` includes offline input/path regressions. Its separate
+CLI-install smoke is tagged `Native` so a bounded offline selection can exclude
+it explicitly; neither selection proves full native host enforcement.
+
 #### Regression suites
 
 **Policy: major new functionality must come with tests.** A pull request that
