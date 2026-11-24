@@ -164,6 +164,50 @@ approval/Stop boundaries and off/in-chat notification default. These are offline
 packaging and policy-wiring checks, not proof of arbitrary model compliance or
 whole-package certification. No live model or notification send is required.
 
+#### Offline package telemetry assurance
+
+Build the plugin with the exact HVE Core pin before reviewing its telemetry
+surface. Supply existing local inputs explicitly; the checker never builds,
+downloads dependencies or calls a model:
+
+```powershell
+pwsh -NoProfile -File .\scripts\Test-SquadTelemetry.ps1 `
+  -PluginRoot <built-plugin-directory> `
+  -ExpectedSupplierCommit <full-hve-core-pin> `
+  -OutputPath <report-outside-plugin.json>
+```
+
+Without a review policy this intentionally returns `Incomplete` (exit 2).
+The inventory counts every delivered file, records SHA-256 seals and exposes
+outbound/reporting candidates. Review the content, not only the candidate matches.
+Then supply `-ReviewPolicyPath <reviewed-policy.json>` using the checker's
+documented schema. A policy binds package version, supplier pin, reviewer,
+review date, exhaustive grouped paths/seals and explicit candidate dispositions.
+Never generate an approval merely because hashes match.
+
+Changed/uncovered files, missing supplier evidence or independent reporting
+cannot produce a package-wide pass. This is reviewed static coverage, not a
+sandbox or proof that arbitrary model/harness behavior never uses the network.
+Local helper/hook interception tests establish only the exercised paths.
+
+#### Local planning-artifact integrity
+
+After finalizing a local RAI plan and its state, generate its integrity manifest:
+
+```powershell
+npm run rai:sign -- -ProjectSlug <project-slug>
+```
+
+Requires PowerShell 7.4+. The script writes a sorted SHA-256 inventory under
+`.copilot-tracking/rai-plans/<project-slug>/artifact-manifest.json`, without
+network requests, credentials, signing services or a model. It excludes previous
+manifests/signature outputs and rejects unsafe paths. Later artifact changes
+require regeneration. Keep a trusted baseline when checking hashes.
+
+Despite the compatibility command name, this is an integrity manifest, not an
+authenticated signature, authorship proof or RAI certification. Keyless signing
+and its external identity/transparency services are not enabled.
+
 #### Regression suites
 
 **Policy: major new functionality must come with tests.** A pull request that

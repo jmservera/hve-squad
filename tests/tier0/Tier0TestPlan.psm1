@@ -87,13 +87,15 @@ function Get-Tier0TestPlan {
                 'PrValidation.Tests.ps1'
                 'Tier0Runner.Tests.ps1'
                 'Build-SquadPlugin.Tests.ps1'
-                'ResponsibleUse.Tests.ps1'
                 'Performance.Tests.ps1'
                 'Packaging.Tests.ps1'
                 'WatchMode.Tests.ps1'
                 'HotFileBudget.Tests.ps1'
                 'ConnectorContract.Tests.ps1'
                 'SquadBuilder.Tests.ps1'
+                'ResponsibleUse.Tests.ps1'
+                'Sign-PlannerArtifacts.Tests.ps1'
+                'SquadTelemetry.Tests.ps1'
                 'SquadStudioCanvas.Tests.ps1'
             )
         }
