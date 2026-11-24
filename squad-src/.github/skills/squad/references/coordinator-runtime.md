@@ -1,5 +1,5 @@
 ---
-description: "Coordinator runtime."
+description: "Coordinator."
 ---
 <!--
 Copyright (c) Microsoft Corporation.
