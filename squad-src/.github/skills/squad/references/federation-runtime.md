@@ -1,5 +1,5 @@
 ---
-description: "Federation runtime."
+description: "Federation mechanics and lifecycle."
 ---
 <!--
 Copyright (c) Microsoft Corporation.
@@ -75,7 +75,7 @@ require `routingReady: true` before every dispatch, including quick/autopilot.
 Root plans never activate member models. Forward brief
 `responsibleUsePath`/`sourceDataRule` verbatim to isolated contexts; read policy once.
 
-Before child dispatch take the script snapshot with
+Before child dispatch, snapshot with
 `Get-SquadDispatchBrief.ps1 ... -AsJson -SnapshotPath <transport>`. Keep it
 outside state; never author its costs/hashes. It preserves prior root overhead.
 
