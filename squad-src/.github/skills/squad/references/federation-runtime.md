@@ -1,5 +1,5 @@
 ---
-description: "Federation runtime."
+description: "Federation mechanics and lifecycle."
 ---
 <!--
 Copyright (c) Microsoft Corporation.
@@ -8,8 +8,8 @@ Licensed under the MIT license.
 
 # Federation Runtime
 
-Verify isolation/dependencies/two-level proof. Federation is additive;
-scripts/autopilot: no approvals or specialist results.
+Verify isolated member work, dependencies and two-level proof. Federation is
+additive; scripts/autopilot grant no approval or specialist result.
 
 ## Detect and Load Only Active Policy
 
@@ -19,7 +19,7 @@ Run `Get-SquadDispatchBrief.ps1 -RepoRoot <repo> -SquadRoot <root> -AsJson`.
 Forward trusted `routing=` via `-RequestedModelRouting <mode>`.
 `federation.md` takes precedence over `team.md`; absent federation plus an
 existing plain squad offers promotion, otherwise offer Init/plain squad.
-Invocation never authorizes seeding.
+Do not seed merely because the entrypoint was invoked.
 
 | Trigger | Read before acting |
 |---------|--------------------|
@@ -71,9 +71,9 @@ Pass selected squads, explicit dependencies and proven write sets to
 schedule, not admit. Dispatch workers, not coordinators. Start each native
 member prompt with `Squad root: .copilot-tracking/squad/members/<name>`.
 Member plans pass `endpoint.requestedModelRouting` to `-ApplyModelRouting`;
-require `routingReady: true` before every dispatch, including quick/autopilot.
-Root plans never activate member models. Forward brief
-`responsibleUsePath`/`sourceDataRule` verbatim to isolated contexts; read policy once.
+require `routingReady: true` before each dispatch. Root models stay off. Forward
+brief `responsibleUsePath`/`sourceDataRule` verbatim to isolated contexts;
+read policy once.
 
 Before child dispatch take the script snapshot with
 `Get-SquadDispatchBrief.ps1 ... -AsJson -SnapshotPath <transport>`. Keep it

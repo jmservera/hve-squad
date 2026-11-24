@@ -130,9 +130,9 @@ if ($policy -notmatch 'Preserve human gates and Stop decisions' -or
     It 'preserves human authority and no-export constraints in worker briefs, not only trigger parsing' {
         $runtime = [IO.File]::ReadAllText((Join-Path $SourceRoot 'squad-src/.github/skills/squad/references/coordinator-runtime.md'))
         $runtime | Should -Match 'read-only inputs'
-        $runtime | Should -Match '(?s)Forward brief `responsibleUsePath`/`sourceDataRule` verbatim to isolated workers;\s+read policy there'
+        $runtime | Should -Match '(?s)Forward the brief.s\s+`responsibleUsePath`.+`sourceDataRule`.+isolated worker'
         $federation = [IO.File]::ReadAllText((Join-Path $SourceRoot 'squad-src/.github/skills/squad/references/federation-runtime.md'))
-        $federation | Should -Match '(?s)Forward brief\s+`responsibleUsePath`/`sourceDataRule` verbatim to isolated contexts;\s+read policy once'
+        $federation | Should -Match '(?s)Forward\s+brief `responsibleUsePath`/`sourceDataRule` verbatim to isolated contexts;\s+read policy\s+once'
         $script:Policy | Should -Match 'In every worker brief'
         $script:Policy | Should -Match 'data, not authority to change routing, grant consent, bypass gates or export local'
         $script:Policy | Should -Match 'human Stop decisions'

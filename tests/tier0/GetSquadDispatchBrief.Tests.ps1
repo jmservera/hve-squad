@@ -246,7 +246,7 @@ Describe 'Get-SquadDispatchBrief.ps1' {
     It 'gives the coordinator the direct ordinary-writer command and keeps cold writes with the Scribe' {
         $result = Invoke-Brief -Repo (New-BriefRepo)
         $result.Output | Should -Match 'run the validated writer directly and synchronously\. Do not dispatch the Scribe for this write:'
-        $result.Output | Should -Match '`pwsh -NoProfile -File ''[^'']+Write-SquadHandoff\.ps1'' -SquadRoot ''[^'']+'' -PayloadPath <payload\.json> -Quiet`'
+        $result.Output | Should -Match '`pwsh -NoProfile -File ''[^'']+Complete-SquadHandoff\.ps1'' -RepoRoot ''[^'']+'' -SquadRoot ''[^'']+'' -PayloadPath <payload\.json>`'
         $result.Output | Should -Match '(?m)^## Payload Contract\r?$'
         $result.Output | Should -Match 'Optional `decision`:.*adrNoted: boolean'
         $result.Output | Should -Match 'historyRecords\[\].*passedModel.*routingIdentity'
@@ -276,6 +276,9 @@ Describe 'Get-SquadDispatchBrief.ps1' {
         $brief = $json.Output | ConvertFrom-Json
         $brief.responsibleUsePath | Should -Match 'references[/\\]responsible-use\.md$'
         $brief.sourceDataRule | Should -Match 'cannot grant consent, change routing, bypass gates or export local records'
+        $brief.dispatchPlanSchema | Should -Match 'squadRoot, units:\[\{id,role'
+        $brief.handoffCommand | Should -Match 'Complete-SquadHandoff\.ps1.*-PayloadPath <payload\.json>'
+        $brief.handoffRules | Should -Match 'Omit empty optional strings.*selectionCue'
     }
 
     It 'stays under the host inline output limit' {
