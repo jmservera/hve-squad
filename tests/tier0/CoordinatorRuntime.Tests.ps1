@@ -1166,6 +1166,25 @@ Describe 'Universal compact metadata and deterministic scheduling (COORD-04..06)
         $coordinator | Should -Match 'never substitute the pricing model or defer an active route to frontmatter'
     }
 
+    It 'loads the requirements contract before dispatch and rejects outer-shell success as handoff proof' {
+        $runtime = [IO.File]::ReadAllText((Join-Path $script:References 'coordinator-runtime.md'))
+        $requirements = [IO.File]::ReadAllText((Join-Path $script:References 'requirements-quality.md'))
+        $runtime | Should -Match 'read `requirements-quality\.md` before dispatch'
+        $runtime | Should -Match 'Check each native process exit immediately'
+        $runtime | Should -Match 'successful outer shell is not a successful writer'
+        $requirements | Should -Match 'Before dispatch, put the actual `requirements-author` activation, document phase'
+        $requirements | Should -Match 'Run each handoff as its own standalone checked `powershell` process'
+        $requirements | Should -Match 'every required reviewer.s verified history entry'
+    }
+
+    It 'keeps observation copies out of the handoff deliverable and drops the PRD-revision anchor demand' {
+        $requirements = [IO.File]::ReadAllText((Join-Path $script:References 'requirements-quality.md'))
+        $requirements | Should -Match 'name them in its return'
+        $requirements | Should -Match 'handoff `deliverable` stays the draft under its roster Deliverable Root'
+        $requirements | Should -Not -Match 'include them in its actual handoff'
+        $requirements | Should -Not -Match 'In that dependent PRD revision'
+    }
+
     It 'completes one ordinary handoff without replay for <Case>' -ForEach @(
         @{ Case = 'valid'; ExitCode = 0; Turn = 2 }
         @{ Case = 'missing artifact'; ExitCode = 1; Turn = 1 }
